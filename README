@@ -1,0 +1,22 @@
+This is a reimplementation of the transformation compiler that I wrote as part of my PhD research.  The original was written in Scheme, the one here is written in Go.  A version of the original can be found in the `ps-compiler` directory of Scheme48 (http://s48.org).
+
+The compiler is incomplete.  There is a front end for a subset of Go in the `front` directory but as yet no back end, other than a generic register allocator.  Many of the optimizations in the Scheme version are missing as well.
+
+On the other hand, this Go version uses a simpler CPS node sturcture and, unlike the original, includes a complete conversion to Static Single Assignment form.
+
+Directories:
+ cps - The core of the transformational compiler.
+ front - A front end for a subset of Go.
+ util - Random utilities.
+ test - Test application and a small collection of input files.
+ doc - My dissertation and a couple of other papers.
+
+The `doc` directory has three papers:
+
+ kelsey-diss-2012.pdf - My dissertation, which Olin Shivers restored from my original, no-longer-working LaTeX sources.
+
+ comp-by-prog-trans.pdf - An overview paper.
+
+ cps-and-ssa.pdf - A paper describing how continuation passing style and static single assigment form are kind of the same thing. This is a replacement for section 6.3 of the dissertation, which was a bit of a hack.
+ 
+  
