@@ -17,7 +17,7 @@ import (
 )
 
 func Evaluate(proc *CallNodeT, args []int) []int {
-	return evaluate(proc, args, &VarEnvT{map[*VariableT]*valueT{}})
+	return evaluate(proc, args, &VarEnvT{map[*VariableT]any{}})
 }
 
 func RegEvaluate(proc *CallNodeT, args []int) []int {
@@ -26,7 +26,7 @@ func RegEvaluate(proc *CallNodeT, args []int) []int {
 
 func evaluate(proc *CallNodeT, args []int, env EnvT) []int {
 	for i, arg := range args {
-		env.Set(proc.Outputs[i+1], &valueT{kind: intKind, intValue: arg})
+		env.Set(proc.Outputs[i+1], arg)
 	}
 	call := proc
 	for call.Primop.Name() != "return" {
@@ -49,32 +49,32 @@ type EvalPrimopT interface {
 // Values for variables.
 
 type EnvT interface {
-	Get(*VariableT) *valueT
-	Set(*VariableT, *valueT)
+	Get(*VariableT) any
+	Set(*VariableT, any)
 }
 
 type VarEnvT struct {
-	values map[*VariableT]*valueT
+	values map[*VariableT]any
 }
 
-func (env *VarEnvT) Get(vart *VariableT) *valueT {
+func (env *VarEnvT) Get(vart *VariableT) any {
 	return env.values[vart]
 }
 
-func (env *VarEnvT) Set(vart *VariableT, value *valueT) {
+func (env *VarEnvT) Set(vart *VariableT, value any) {
 	env.values[vart] = value
 }
 
 type RegEnvT struct {
-	values map[RegisterT]*valueT
-	labels map[*VariableT]*valueT
+	values map[RegisterT]any
+	labels map[*VariableT]any
 }
 
 func newRegEnv() *RegEnvT {
-	return &RegEnvT{map[RegisterT]*valueT{}, map[*VariableT]*valueT{}}
+	return &RegEnvT{map[RegisterT]any{}, map[*VariableT]any{}}
 }
 
-func (env *RegEnvT) Get(vart *VariableT) *valueT {
+func (env *RegEnvT) Get(vart *VariableT) any {
 	labelValue := env.labels[vart]
 	if labelValue != nil {
 		return labelValue
@@ -82,35 +82,19 @@ func (env *RegEnvT) Get(vart *VariableT) *valueT {
 	return env.values[vart.Register]
 }
 
-func (env *RegEnvT) Set(vart *VariableT, value *valueT) {
-	if value.kind == jumpKind {
+func (env *RegEnvT) Set(vart *VariableT, rawValue any) {
+	switch value := rawValue.(type) {
+	case *CallNodeT:
 		env.labels[vart] = value
-	} else {
+	default:
 		env.values[vart.Register] = value
 	}
-}
-
-type valueKindT int
-
-// The four possible types of values.
-const (
-	intKind = iota
-	boolKind
-	cellKind
-	jumpKind
-)
-
-type valueT struct {
-	kind         valueKindT
-	intValue     int // also used as 0 and 1 for bools
-	cellContents *valueT
-	lambda       *CallNodeT // jump lambdas
 }
 
 //----------------------------------------------------------------
 // Get a node's value.
 
-func NodeValue(rawNode NodeT, env EnvT) *valueT {
+func NodeValue(rawNode NodeT, env EnvT) any {
 	switch node := rawNode.(type) {
 	case *LiteralNodeT:
 		switch node.Value.Kind() {
@@ -119,7 +103,7 @@ func NodeValue(rawNode NodeT, env EnvT) *valueT {
 			if err != nil {
 				panic(fmt.Sprintf("failed to parser int literal '%s'", err))
 			}
-			return &valueT{kind: intKind, intValue: int(n)}
+			return int(n)
 		default:
 			panic("literal node has no int value")
 		}
@@ -129,31 +113,53 @@ func NodeValue(rawNode NodeT, env EnvT) *valueT {
 		if node.CallType != JumpLambda {
 			panic("NodeValue has non-jump lambda node")
 		}
-		return &valueT{kind: jumpKind, lambda: node}
+		return node
 	default:
-		panic("NodeValue has call node")
+		panic("NodeValue got unknown node type")
 	}
 }
 
 func nodeIntValue(node NodeT, env EnvT) int {
-	value := NodeValue(node, env)
-	if value.kind != intKind {
-		PpCps(node)
-		fmt.Printf("kind is %d\n", value.kind)
-		panic("node has no int value")
+	switch value := NodeValue(node, env).(type) {
+	case int:
+		return value
+	default:
+		panic("node value is not an int: " + node.String())
 	}
-	return value.intValue
 }
 
-func nodeJumpValue(rawNode NodeT, env EnvT) *CallNodeT {
-	switch node := rawNode.(type) {
-	case *ReferenceNodeT:
-		value := env.Get(node.Variable)
-		if value.kind != jumpKind {
-			panic("value is not a jump lambda")
-		}
-		return value.lambda
+func nodeBoolValue(node NodeT, env EnvT) bool {
+	switch value := NodeValue(node, env).(type) {
+	case bool:
+		return value
 	default:
-		panic("node has no int value")
+		panic("node value is not a bool: " + node.String())
+	}
+}
+
+func nodeJumpLambdaValue(node NodeT, env EnvT) *CallNodeT {
+	switch value := NodeValue(node, env).(type) {
+	case *CallNodeT:
+		return value
+	default:
+		panic("node value is not a jump lambda: " + node.String())
+	}
+}
+
+func nodeIntSliceValue(node NodeT, env EnvT) []int {
+	switch value := NodeValue(node, env).(type) {
+	case []int:
+		return value
+	default:
+		panic("node value is not an []int: " + node.String())
+	}
+}
+
+func nodeIntPointerValue(node NodeT, env EnvT) *int {
+	switch value := NodeValue(node, env).(type) {
+	case *int:
+		return value
+	default:
+		panic("node value is not a *int: " + node.String())
 	}
 }

@@ -26,7 +26,7 @@ func (reg *registerT) Class() *RegisterClassT { return reg.class }
 func (reg *registerT) String() string         { return reg.name }
 
 const (
-	numRegs     = 4
+	numRegs     = 5
 	allRegsMask = (1 << numRegs) - 1
 )
 
@@ -90,6 +90,7 @@ func DefinePrimops() {
 	addPrimop(&JumpPrimopT{})
 	addPrimop(&ReturnPrimopT{})
 	addPrimop(&LoadRegPrimopT{})
+	addPrimop(&MakeLiteralPrimopT{})
 	addPrimop(&IfPrimopT{})
 	addPrimop(&IfLtPrimopT{})
 	addPrimop(&IfEqPrimopT{})
@@ -101,6 +102,9 @@ func DefinePrimops() {
 	addPrimop(&CompPrimopT{"==", "if=", false})
 	addPrimop(&CompPrimopT{"!=", "if=", true})
 	addPrimop(&NotPrimopT{})
+	addPrimop(&LenPrimopT{})
+	addPrimop(&SliceIndexPrimopT{})
+	addPrimop(&PointerRefPrimopT{})
 }
 
 // No macros...
@@ -140,11 +144,7 @@ func (primop *LetPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*Reg
 }
 func (primop *LetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	for i, vart := range call.Outputs {
-		val := NodeValue(call.Inputs[i], env)
-		if val.kind != jumpKind {
-			panic("let primop has non-jump-lambda value")
-		}
-		env.Set(vart, val)
+		env.Set(vart, nodeJumpLambdaValue(call.Inputs[i], env))
 	}
 	return call.Next[0], env
 }
@@ -169,7 +169,9 @@ func (primop *CellRefPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) 
 func (primop *CellRefPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	panic("Generating code for " + primop.Name())
 }
-func (primop *CellRefPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) { return nil, env }
+func (primop *CellRefPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	return nil, env
+}
 
 type CellSetPrimopT struct{}
 
@@ -179,7 +181,9 @@ func (primop *CellSetPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) 
 func (primop *CellSetPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	panic("Generating code for " + primop.Name())
 }
-func (primop *CellSetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) { return nil, env }
+func (primop *CellSetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	return nil, env
+}
 
 type PointerSetPrimopT struct{}
 
@@ -203,11 +207,7 @@ func (primop *LetrecPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*
 }
 func (primop *LetrecPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	for i, vart := range call.Outputs {
-		val := NodeValue(call.Inputs[i], env)
-		if val.kind != jumpKind {
-			panic("letrec primop has non-jump-lambda value")
-		}
-		env.Set(vart, val)
+		env.Set(vart, nodeJumpLambdaValue(call.Inputs[i], env))
 	}
 	return call.Next[0], env
 }
@@ -221,7 +221,7 @@ func (primop *JumpPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*Re
 	return registerUsageSpec(call, jumpRegUseSpec, nil)
 }
 func (primop *JumpPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
-	jumpLambda := nodeJumpValue(call.Inputs[0], env)
+	jumpLambda := nodeJumpLambdaValue(call.Inputs[0], env)
 	for i, vart := range jumpLambda.Outputs {
 		env.Set(vart, NodeValue(call.Inputs[i+1], env))
 	}
@@ -240,7 +240,9 @@ func (primop *ReturnPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*
 	}
 	return inputs, nil
 }
-func (primop *ReturnPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) { return nil, env }
+func (primop *ReturnPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	return nil, env
+}
 
 // Load a register with an immediage value.
 type LoadRegPrimopT struct{}
@@ -253,7 +255,25 @@ func (primop *LoadRegPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []
 }
 func (primop *LoadRegPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	x := nodeIntValue(call.Inputs[0], env)
-	env.Set(call.Outputs[0], &valueT{kind: intKind, intValue: x})
+	env.Set(call.Outputs[0], x)
+	return call.Next[0], env
+}
+
+// Load a register with an immediage value.
+type MakeLiteralPrimopT struct{}
+
+func (primop *MakeLiteralPrimopT) Name() string             { return "makeLiteral" }
+func (primop *MakeLiteralPrimopT) SideEffects() bool        { return false }
+func (primop *MakeLiteralPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *MakeLiteralPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
+	return registerUsage(call)
+}
+func (primop *MakeLiteralPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	value := make([]int, len(call.Inputs))
+	for i, input := range call.Inputs {
+		value[i] = nodeIntValue(input, env)
+	}
+	env.Set(call.Outputs[0], value)
 	return call.Next[0], env
 }
 
@@ -266,14 +286,10 @@ func (primop *IfPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegU
 	panic("Generating code for " + primop.Name())
 }
 func (primop *IfPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
-	val := NodeValue(call.Inputs[0], env)
-	if val.kind != boolKind {
-		panic("if primop got non-bool value")
-	}
-	if val.intValue == 0 {
-		return call.Next[1], env
-	} else {
+	if nodeBoolValue(call.Inputs[0], env) {
 		return call.Next[0], env
+	} else {
+		return call.Next[1], env
 	}
 }
 
@@ -390,8 +406,7 @@ func (primop *BinopPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, Env
 func evalBinop(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	x := nodeIntValue(call.Inputs[0], env)
 	y := nodeIntValue(call.Inputs[1], env)
-	z := 0
-	var kind valueKindT = intKind
+	var z any
 	switch call.Primop.Name() {
 	case "+":
 		z = x + y
@@ -400,25 +415,18 @@ func evalBinop(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	case "*":
 		z = x * y
 	case "<", ">=", "==", "!=":
-		var res bool
 		switch call.Primop.Name() {
 		case "<":
-			res = x < y
+			z = x < y
 		case ">=":
-			res = x >= y
+			z = x >= y
 		case "==":
-			res = x == y
+			z = x == y
 		case "!=":
-			res = x != y
+			z = x != y
 		}
-		if res {
-			z = 1
-		} else {
-			x = 0
-		}
-		kind = boolKind
 	}
-	env.Set(call.Outputs[0], &valueT{kind: kind, intValue: z})
+	env.Set(call.Outputs[0], z)
 	return call.Next[0], env
 }
 
@@ -450,4 +458,49 @@ func (primop *NotPrimopT) Simplify(call *CallNodeT) {
 func (primop *NotPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	panic("Generating code for 'not'")
 }
-func (primop *NotPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) { return nil, env }
+func (primop *NotPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	return nil, env
+}
+
+type LenPrimopT struct{}
+
+func (primop *LenPrimopT) Name() string             { return "len" }
+func (primop *LenPrimopT) SideEffects() bool        { return false }
+func (primop *LenPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *LenPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
+	return registerUsage(call)
+}
+func (primop *LenPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	slice := nodeIntSliceValue(call.Inputs[0], env)
+	env.Set(call.Outputs[0], len(slice))
+	return call.Next[0], env
+}
+
+type SliceIndexPrimopT struct{}
+
+func (primop *SliceIndexPrimopT) Name() string             { return "sliceIndex" }
+func (primop *SliceIndexPrimopT) SideEffects() bool        { return false }
+func (primop *SliceIndexPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *SliceIndexPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
+	return registerUsage(call)
+}
+func (primop *SliceIndexPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	slice := nodeIntSliceValue(call.Inputs[0], env)
+	index := nodeIntValue(call.Inputs[1], env)
+	env.Set(call.Outputs[0], &slice[index])
+	return call.Next[0], env
+}
+
+type PointerRefPrimopT struct{}
+
+func (primop *PointerRefPrimopT) Name() string             { return "pointerRef" }
+func (primop *PointerRefPrimopT) SideEffects() bool        { return false }
+func (primop *PointerRefPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *PointerRefPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
+	return registerUsage(call)
+}
+func (primop *PointerRefPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	pointer := nodeIntPointerValue(call.Inputs[0], env)
+	env.Set(call.Outputs[0], *pointer)
+	return call.Next[0], env
+}

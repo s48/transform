@@ -4,8 +4,9 @@
 package app
 
 func add(x uint32, y uint32) uint32 {
-	z := x + 5
-	z = x + 10
+	z := x + 6
+	z = x + 11
+	z--
 	if x < y {
 		x = x + y + 2
 	} else {

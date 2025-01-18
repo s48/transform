@@ -217,7 +217,7 @@ func Substitute(vart *VariableT, val NodeT, detachVal bool) {
 			if i == 0 && detachVal {
 				ReplaceInput(ref, DetachInput(val))
 			} else {
-				ReplaceInput(ref, copyNodeTree(val))
+				ReplaceInput(ref, CopyNodeTree(val))
 			}
 		}
 	} else if detachVal {
@@ -231,7 +231,7 @@ func Substitute(vart *VariableT, val NodeT, detachVal bool) {
 // Copy the node-tree `node`.  This dispatches on the type of the node.
 // Variables which have been copied have the copy in their `copy` field.
 
-func copyNodeTree(rawNode NodeT) NodeT {
+func CopyNodeTree(rawNode NodeT) NodeT {
 	switch node := rawNode.(type) {
 	case *CallNodeT:
 		return copyCall(node)
@@ -242,7 +242,9 @@ func copyNodeTree(rawNode NodeT) NodeT {
 		if vart.Copy != nil {
 			vart = vart.Copy
 		}
-		return MakeReferenceNode(vart)
+		result := MakeReferenceNode(vart)
+		result.source = node.source
+		return result
 	default:
 		panic("unknown node type")
 	}
@@ -251,10 +253,6 @@ func copyNodeTree(rawNode NodeT) NodeT {
 // The outputs' copies are put in their VARIABLE-FLAG while call is being copied.
 
 func copyCall(node *CallNodeT) *CallNodeT {
-	inputs := make([]NodeT, len(node.Inputs))
-	for i, input := range node.Inputs {
-		inputs[i] = copyNodeTree(input)
-	}
 	outputs := make([]*VariableT, len(node.Outputs))
 	for i, oldVar := range node.Outputs {
 		if oldVar != nil {
@@ -263,16 +261,24 @@ func copyCall(node *CallNodeT) *CallNodeT {
 			outputs[i] = newVar
 		}
 	}
+	inputs := make([]NodeT, len(node.Inputs))
+	for i, input := range node.Inputs {
+		inputs[i] = CopyNodeTree(input)
+	}
 	newNode := MakeCall(node.Primop, outputs, inputs...)
 	newNode.CallType = node.CallType
+	newNode.source = node.source
 	newNode.Next = make([]*CallNodeT, len(node.Next))
 	for i, next := range node.Next {
-		AttachNext(newNode, copyNodeTree(next).(*CallNodeT), i)
+		AttachNext(newNode, CopyNodeTree(next).(*CallNodeT), i)
 	}
 	for _, newVar := range outputs {
 		if newVar != nil {
 			newVar.Copy = nil
 		}
+	}
+	if node.IsLambda() {
+		Lambdas.Add(newNode)
 	}
 	return newNode
 }

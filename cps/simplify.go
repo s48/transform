@@ -9,17 +9,8 @@ import (
 	"fmt"
 )
 
-// This removes 'call' if it has no side effects and its outputs are
-// not used, and otherwise invokes the primop-specific simplifier.
-
 func simplifyCall(call *CallNodeT) {
-	if !call.IsLambda() && !call.Primop.SideEffects() && len(call.Next) == 1 &&
-		Every(func(vart *VariableT) bool { return len(vart.Refs) == 0 },
-			call.Outputs) {
-		RemoveCall(call)
-	} else {
-		call.Primop.Simplify(call)
-	}
+	call.Primop.Simplify(call)
 }
 
 // The simplifier for primops that have nothing specific to look for.
@@ -52,8 +43,16 @@ func simplifyInputs(call *CallNodeT) {
 func SimplifyNext(call *CallNodeT) {
 	for i := range call.Next {
 		for !call.Next[i].IsSimplified() {
-			call.Next[i].SetIsSimplified(true)
-			simplifyCall(call.Next[i])
+			next := call.Next[i]
+			next.SetIsSimplified(true)
+			simplifyCall(next)
+
+			next = call.Next[i]
+			if next.IsSimplified() && !next.Primop.SideEffects() && len(next.Next) == 1 &&
+				Every(func(vart *VariableT) bool { return len(vart.Refs) == 0 },
+					next.Outputs) {
+				RemoveCall(next)
+			}
 		}
 	}
 	call.SetIsSimplified(true)

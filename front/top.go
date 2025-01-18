@@ -118,6 +118,7 @@ func MakeTopLevelForm(decl *ast.FuncDecl, parsedFile *ParsedFileT, globals Bindi
 }
 
 func SimplifyTopLevel(lambda *CallNodeT) {
+	CheckNode(lambda)
 	TopLambda = lambda
 	SimplifyNext(lambda)
 	CheckNode(lambda)

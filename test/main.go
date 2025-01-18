@@ -126,6 +126,17 @@ var allTests = map[string]*testT{
 		testCaseT{[]int{1}, []int{1}},
 		testCaseT{[]int{5}, []int{120}},
 	}},
+	"fact_range_define_key": &testT{cases: []testCaseT{
+		testCaseT{[]int{1}, []int{1}},
+		testCaseT{[]int{5}, []int{120}},
+	}},
+	"fact_range_no_key": &testT{cases: []testCaseT{
+		testCaseT{[]int{1}, []int{1}},
+		testCaseT{[]int{5}, []int{120}},
+	}},
+	"slice_sum": &testT{cases: []testCaseT{
+		testCaseT{[]int{}, []int{15}},
+	}},
 	"and": &testT{cases: []testCaseT{
 		testCaseT{[]int{1, 4}, []int{7}},     // x < y && y < 10
 		testCaseT{[]int{2, 10}, []int{20}},   // x < y && y !< 10

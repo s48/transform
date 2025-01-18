@@ -202,7 +202,16 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 		cpsRangeLoop(x, env, calls)
 	case *ast.IfStmt:
 		cpsIfStatement(x, env, calls)
-		//  case *ast.IncDecStmt:
+	case *ast.IncDecStmt:
+		lhs := cpsLhs(x.X, false, env, calls)
+		delta := big.NewInt(1)
+		if x.Tok == token.DEC {
+			delta = big.NewInt(-1)
+		}
+		deltaNode := MakeLiteral(delta, env.typeInfo.Types[x.X].Type)
+		before := lhs.read(calls)
+		after := makeExprCall("+", x.TokPos, x.X, env, calls, before, deltaNode)[0]
+		lhs.write(after, calls)
 	case *ast.ReturnStmt:
 		// Use Map to convert []NodeT to []Any to satisfy Go's type checking.
 		values := Map(func(x NodeT) any { return x }, cpsArguments(x.Results, env, calls))
@@ -363,6 +372,15 @@ func cpsIfStatement(x *ast.IfStmt, env *envT, calls *CallsT) {
 
 // The body's conversion needs to be delayed until after the 'continue'
 // and 'break' labels have been added to the environment.
+//
+// From the Go spec:
+//   Each iteration has its own separate declared variable (or
+//   variables) [Go 1.22]. The variable used by the first iteration is
+//   declared by the init statement. The variable used by each
+//   subsequent iteration is declared implicitly before executing the
+//   post statement and initialized to the value of the previous
+//   iteration's variable at that moment.
+// This is detectable if a function closes over an interation variable.
 
 func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 	cond NodeT, // the loop ending expression
@@ -424,45 +442,61 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 // Basically, X gives the loop count and, if present, Key and/or Value get
 // set to the iteration value, which is an integer except for tables, and
 // the corresponding element of X.
-
+//
 // This doesn't handle Value yet, only Key.
+//
+// From the Go spec:
+//   The iteration variables may be declared by the "range" clause
+//   using a form of short variable declaration (:=). In this case
+//   their scope is the block of the "for" statement and each
+//   iteration has its own new variables
+// We don't currently do this.
 
 func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
-	keyName := "key"
-	var keyType types.Type
-	var keyPos token.Pos
-	if rangeStmt.Key != nil {
-		ident := rangeStmt.Key.(*ast.Ident)
-		keyName = ident.Name
-		keyType = env.typeInfo.ObjectOf(ident).Type()
-		keyPos = ident.Pos()
-	} else {
-		keyName = "key"
-		keyType = rangeStmtKeyType(rangeStmt.X, env)
+	rangeVal := cpsExpr(rangeStmt.X, env, calls)[0]
+	rangeVar := rangeVal.(*ReferenceNodeT).Variable
+	var rangeLimit NodeT
+	switch rangeVar.Type.(type) {
+	case *types.Slice:
+		rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
+	default:
+		rangeLimit = rangeVal
 	}
-	keyCellVar := MakeCellVariable(keyName, keyType, keyPos)
-	env.addMakeCell(keyCellVar)
-	calls.BuildNoOutputCall("cellSet", keyCellVar, 0)
-	//  var valueVar *VariableT
-	//    if rangeStmt.Value != nil {
-	//        valueVar = MakeCellVariable(rangeStmt.Value.(*ast.Ident).Name)
-	//    }
+	var keyLhs LhsT
+	var valueLhs LhsT
+	if rangeStmt.Tok == token.ILLEGAL {
+		// We make an LHS with an unbound variable.
+		keyVar := MakeVariable("key", types.Typ[types.Int], rangeStmt.For)
+		keyVar.Flags["cell"] = true
+		env.addMakeCell(keyVar)
+		keyLhs = &PointerLhsT{"cellRef", "cellSet", keyVar, rangeStmt.For}
+	} else {
+		newOkay := rangeStmt.Tok == token.DEFINE
+		keyLhs = cpsLhs(rangeStmt.Key, newOkay, env, calls)
+		if rangeStmt.Value != nil {
+			valueLhs = cpsLhs(rangeStmt.Value, newOkay, env, calls)
+		}
+	}
+	keyLhs.write(MakeLiteral(big.NewInt(0), types.Typ[types.Int]), calls)
 	body := func(env *envT, calls *CallsT) {
-		if rangeStmt.Key != nil {
-			keyVar := env.bindVar(rangeStmt.Key.(*ast.Ident))
-			calls.BuildVarCall("cellRef", keyVar, keyCellVar)
+		if valueLhs != nil {
+			pointerVar := MakeVariable("v", types.NewPointer(valueLhs.valueType()))
+			calls.BuildVarCall("sliceIndex", pointerVar, rangeVar, keyLhs.read(calls))
+			// calls.SetLastSource(x.Lbrack)
+			valueVar := MakeVariable("v", valueLhs.valueType())
+			calls.BuildVarCall("pointerRef", valueVar, pointerVar)
+			valueLhs.write(MakeReferenceNode(valueVar), calls)
 		}
 		cpsStmt(rangeStmt.Body, env, calls)
 	}
 	post := MakeCalls()
-	keyVal := post.BuildCall("cellRef", keyCellVar.Name, keyCellVar.Type, keyCellVar)
-	keyVal = post.BuildCall("+", keyName+"val", keyType, keyVal, 1)
+	keyVal := keyLhs.read(post)
+	keyVal = MakeReferenceNode(post.BuildCall("+", "keyval", keyVal.(*ReferenceNodeT).Variable.Type, keyVal, 1))
+	keyLhs.write(keyVal, post)
 	post.SetLastSource(rangeStmt.Range)
-	post.BuildNoOutputCall("cellSet", keyCellVar, keyVal)
 	condCalls := MakeCalls()
-	rangeVal := cpsExpr(rangeStmt.X, env, condCalls)[0]
-	keyVal = condCalls.BuildCall("cellRef", keyCellVar.Name, keyCellVar.Type, keyCellVar)
-	condVar := condCalls.BuildCall("<", "cond", types.Typ[types.Bool], keyVal, rangeVal)
+	keyVal = keyLhs.read(condCalls)
+	condVar := condCalls.BuildCall("<", "cond", types.Typ[types.Bool], keyVal, rangeLimit)
 	condCalls.SetLastSource(rangeStmt.Range)
 	makeForLoop(condCalls, MakeReferenceNode(condVar), body, post, rangeStmt.For, env, calls)
 }
@@ -550,6 +584,9 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		} else {
 			panic(fmt.Sprintf("unrecognized BasicLit type"))
 		}
+	case *ast.CompositeLit:
+		inputs := cpsArguments(x.Elts, env, calls)
+		return makeExprCall("makeLiteral", x.Lbrace, x, env, calls, inputs...)
 	case *ast.UnaryExpr:
 		value := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
 		op := x.Op.String()
@@ -679,9 +716,10 @@ func makeExprCall(primop string,
 type LhsT interface {
 	read(calls *CallsT) NodeT
 	write(value NodeT, calls *CallsT)
+	valueType() types.Type
 }
 
-// I know of three three kinds of LHS expressions, identifiers, index
+// I know of three three kinds of LHS expressions: identifiers, index
 // expressions (x[y]) and star expressions (*x).  For identifiers if
 // newOkay is true this is a definition and a new variable can be created
 // (I suspect this is a must).  Index expressions can be for arrays,
@@ -742,15 +780,7 @@ type PointerLhsT struct {
 
 func (lhs *PointerLhsT) read(calls *CallsT) NodeT {
 	node := MakeReferenceNode(lhs.pointer)
-	var valueType types.Type
-	// Hack forced by our not giving cells the pointer type that
-	// they really have.
-	if lhs.readPrimop == "cellRef" {
-		valueType = lhs.pointer.Type
-	} else {
-		valueType = lhs.pointer.Type.(*types.Pointer).Elem()
-	}
-	valueVar := MakeVariable(lhs.pointer.Name, valueType)
+	valueVar := MakeVariable(lhs.pointer.Name, lhs.valueType())
 	calls.BuildVarCall(lhs.readPrimop, valueVar, node)
 	calls.SetLastSource(lhs.source)
 	return MakeReferenceNode(valueVar)
@@ -758,4 +788,15 @@ func (lhs *PointerLhsT) read(calls *CallsT) NodeT {
 
 func (lhs *PointerLhsT) write(value NodeT, calls *CallsT) {
 	calls.BuildNoOutputCall(lhs.writePrimop, lhs.pointer, value)
+}
+
+// Hack forced by our not giving cells the pointer type that
+// they really have.
+
+func (lhs *PointerLhsT) valueType() types.Type {
+	if lhs.readPrimop == "cellRef" {
+		return lhs.pointer.Type
+	} else {
+		return lhs.pointer.Type.(*types.Pointer).Elem()
+	}
 }

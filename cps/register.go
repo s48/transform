@@ -485,7 +485,7 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 						allVars.Add(vart)
 					}
 				} else {
-					panic("got register spec for literal, time to write more code")
+					panic("got register spec for literal " + CallString(call))
 				}
 			}
 		}

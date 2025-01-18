@@ -59,6 +59,8 @@ type NodeT interface {
 	// back to zero upon completion.
 	Flag() int
 	SetFlag(flag int)
+
+	String() string // So they're easy to print.
 }
 
 type NodeBaseT struct {
@@ -97,7 +99,7 @@ type LiteralNodeT struct {
 	NodeBaseT
 	Value constant.Value
 	// types.Type is an easy-to-implement interface, so it's not Go specific.
-	Type  types.Type
+	Type types.Type
 }
 
 func (node *LiteralNodeT) NodeType() NodeTypeT { return LiteralNode }
@@ -112,7 +114,9 @@ func MakeLiteral(value any, typ types.Type) *LiteralNodeT {
 }
 
 func CopyLiteralNode(node *LiteralNodeT) *LiteralNodeT {
-	return &LiteralNodeT{Value: node.Value, Type: node.Type}
+	return &LiteralNodeT{Value: node.Value,
+		Type:      node.Type,
+		NodeBaseT: NodeBaseT{source: node.source}}
 }
 
 //----------------------------------------------------------------
@@ -125,6 +129,9 @@ type ReferenceNodeT struct {
 func (node *ReferenceNodeT) NodeType() NodeTypeT { return ReferenceNode }
 func (node *ReferenceNodeT) IsNil() bool         { return node == nil }
 func (node *ReferenceNodeT) IsValue() bool       { return true }
+func (node *ReferenceNodeT) String() string {
+	return fmt.Sprintf("{reference %s_%d}", node.Variable.Name, node.Variable.Id)
+}
 
 func MakeReferenceNode(variable *VariableT) *ReferenceNodeT {
 	node := &ReferenceNodeT{Variable: variable}
@@ -177,6 +184,10 @@ func (node *CallNodeT) InputVariable(i int) *VariableT {
 		return input.Variable
 	}
 	return nil
+}
+
+func (node *CallNodeT) String() string {
+	return fmt.Sprintf("{call %s}", CallString(node))
 }
 
 func MakeCall(primop PrimopT, outputs []*VariableT, inputs ...NodeT) *CallNodeT {
