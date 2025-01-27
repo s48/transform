@@ -363,10 +363,12 @@ func (primop *BinopPrimopT) Simplify(call *CallNodeT) {
 }
 
 var goOpToken = map[string]token.Token{"+": token.ADD,
-	"-": token.SUB,
-	"*": token.MUL,
-	"&": token.AND,
-	"|": token.OR,
+	"-":  token.SUB,
+	"*":  token.MUL,
+	"&":  token.AND,
+	"|":  token.OR,
+	"^":  token.XOR,
+	"&^": token.AND_NOT,
 }
 
 func SimplifyArithBinop(call *CallNodeT) {
@@ -383,7 +385,7 @@ func SimplifyArithBinop(call *CallNodeT) {
 			call.Primop = LookupPrimop("let")
 			MarkChanged(call)
 			return
-		} else if call.Primop.Name() != "-" {
+		} else if call.Primop.Name() != "-" && call.Primop.Name() != "&^" {
 			// If only one literal put it second.  This makes code
 			// generation easier and will help with simplifying
 			// expressions like '(x + 3) + 4'.

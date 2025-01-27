@@ -13,7 +13,14 @@ type StackT[T any] struct {
 }
 
 func (stack *StackT[T]) Len() int {
-	return len(stack.elts)
+	return stack.count
+}
+
+func (stack *StackT[T]) Ref(i int) T {
+	if stack.count <= i {
+		panic("indexeing past the end of stack")
+	}
+	return stack.elts[i]
 }
 
 func (stack *StackT[T]) Push(elt T) {

@@ -17,40 +17,48 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-type ParsedFileT struct {
-	AstFile   *ast.File
-	Packages  []*packages.Package
-	TypesInfo *types.Info
-	FileSet   *token.FileSet
+type ParsedFilesT struct {
+	Directory   string
+	PackagePath string
+	AstFiles    []*ast.File
+	Packages    []*packages.Package
+	TypesInfo   *types.Info
+	FileSet     *token.FileSet
 }
 
-func ParseFile(fileName string,
-	fileContents []byte,
-	directory string,
-	packagePath string) *ParsedFileT {
+func NewParsedFiles(directory string, packagePath string) *ParsedFilesT {
+	return &ParsedFilesT{
+		Directory:   directory,
+		PackagePath: packagePath,
+		FileSet:     token.NewFileSet()}
+}
 
-	fileSet := token.NewFileSet()
+func (files *ParsedFilesT) ParseFile(fileName string, fileContents []byte) {
 	// As recommended in the docs, we skip the old, pre-Generic type checking.
-	file, err := parser.ParseFile(fileSet,
+	file, err := parser.ParseFile(files.FileSet,
 		fileName,
 		fileContents,
 		parser.SkipObjectResolution)
 	if err != nil {
 		panic(err)
 	}
+	files.AstFiles = append(files.AstFiles, file)
+}
 
+func (files *ParsedFilesT) TypeCheck() {
 	mode := packages.LoadTypes |
 		packages.NeedFiles |
 		packages.NeedSyntax |
 		packages.NeedTypesInfo
-	packageConf := &packages.Config{Mode: mode, Dir: directory}
-	peckages, err := packages.Load(packageConf, packagePath)
+	packageConf := &packages.Config{Mode: mode, Dir: files.Directory}
+	peckages, err := packages.Load(packageConf, files.PackagePath)
 	if err != nil {
 		panic(err) // failed to load anything
 	}
 	if 0 < packages.PrintErrors(peckages) {
 		panic("packages had errors")
 	}
+	files.Packages = peckages
 
 	imports := importsT{packages: map[string]*types.Package{}}
 	for _, peckage := range peckages {
@@ -60,20 +68,18 @@ func ParseFile(fileName string,
 
 	// Actual type checking.
 	conf := types.Config{Importer: imports}
-	typeInfo := types.Info{
+	files.TypesInfo = &types.Info{
 		Types:     map[ast.Expr]types.TypeAndValue{},
 		Defs:      map[*ast.Ident]types.Object{},
 		Uses:      map[*ast.Ident]types.Object{},
 		Instances: map[*ast.Ident]types.Instance{},
 	}
-	_, err = conf.Check("app", fileSet, []*ast.File{file}, &typeInfo)
+	_, err = conf.Check("app", files.FileSet, files.AstFiles, files.TypesInfo)
 	if err != nil {
 		panic(err)
 	}
 
 	// ast.Fprint(os.Stdout, nil, file.Decls[0], nil)
-
-	return &ParsedFileT{file, peckages, &typeInfo, fileSet}
 }
 
 // This implements the type.Importer interface.
@@ -99,10 +105,10 @@ func source(pos token.Pos) string {
 	return TheFileSet.Position(pos).String()
 }
 
-func MakeTopLevelForm(decl *ast.FuncDecl, parsedFile *ParsedFileT, globals BindingsT) *CallNodeT {
-	TheFileSet = parsedFile.FileSet
+func MakeTopLevelForm(decl *ast.FuncDecl, parsedFiles *ParsedFilesT, globals BindingsT) *CallNodeT {
+	TheFileSet = parsedFiles.FileSet
 	contVar := MakeVariable("c", nil)
-	env := makeEnv(contVar, parsedFile.TypesInfo, globals)
+	env := makeEnv(contVar, parsedFiles.TypesInfo, globals)
 	calls := MakeCalls()
 	env.currentBlock.Push(calls)
 	vars := append(makeFieldVars(decl.Type.Params.List, env, calls),

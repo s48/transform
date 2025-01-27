@@ -35,14 +35,16 @@ func main() {
 		}
 	}
 
-	parsedFile := front.ParseFile(source, in, "test", "./...")
+	parsedFiles := front.NewParsedFiles("test", "./...")
+	parsedFiles.ParseFile(source, in)
+	parsedFiles.TypeCheck()
 
 	lambdas := []*cps.CallNodeT{}
-	for _, rawDecl := range parsedFile.AstFile.Decls {
+	for _, rawDecl := range parsedFiles.AstFiles[0].Decls {
 		switch decl := rawDecl.(type) {
 		case *ast.FuncDecl:
 			if *goFunction == "" || *goFunction == decl.Name.Name {
-				lambda := front.MakeTopLevelForm(decl, parsedFile, front.BindingsT{})
+				lambda := front.MakeTopLevelForm(decl, parsedFiles, front.BindingsT{})
 				front.SimplifyTopLevel(lambda)
 				cps.AllocateRegisters(lambda)
 				lambdas = append(lambdas, lambda)

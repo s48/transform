@@ -143,9 +143,13 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 					}
 					for i, ident := range spec.Names {
 						cellVar := env.bindCellVar(ident)
-						if spec.Values != nil {
-							calls.BuildNoOutputCall("cellSet", cellVar, values[i])
+						var value NodeT
+						if spec.Values == nil {
+							value = MakeLiteral(big.NewInt(0), cellVar.Type)
+						} else {
+							value = values[i]
 						}
+						calls.BuildNoOutputCall("cellSet", cellVar, value)
 					}
 				}
 			default:
