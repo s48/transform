@@ -12,9 +12,6 @@ import (
 	"github.com/s48/transform/util"
 )
 
-// This relies on all lambdas being bound at the least common
-// ancestor of their references.
-
 type cellBlockT struct {
 	start    *CallNodeT
 	end      *CallNodeT

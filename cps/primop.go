@@ -33,7 +33,7 @@ const (
 var generalRegister = &RegisterClassT{Name: "r", Registers: make([]RegisterT, numRegs)}
 
 var procOutputSpecs = make([]*RegUseSpecT, numRegs+1)
-var inputSpec = &RegUseSpecT{IsEarly: true, Class: generalRegister, RegisterMask: allRegsMask}
+var inputSpec = &RegUseSpecT{PhaseOffset: EarlyRegUse, Class: generalRegister, RegisterMask: allRegsMask}
 var outputSpec = &RegUseSpecT{Class: generalRegister, RegisterMask: allRegsMask}
 
 func init() {
@@ -88,6 +88,7 @@ func DefinePrimops() {
 	addPrimop(&PointerSetPrimopT{})
 	addPrimop(&LetrecPrimopT{})
 	addPrimop(&JumpPrimopT{})
+	addPrimop(&ProcCallPrimopT{})
 	addPrimop(&ReturnPrimopT{})
 	addPrimop(&LoadRegPrimopT{})
 	addPrimop(&MakeLiteralPrimopT{})
@@ -115,7 +116,11 @@ func (primop *ProcLambdaPrimopT) Name() string             { return "procLambda"
 func (primop *ProcLambdaPrimopT) SideEffects() bool        { return false }
 func (primop *ProcLambdaPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
 func (primop *ProcLambdaPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
-	return nil, procOutputSpecs[:len(call.Outputs)]
+	if call.parent == nil {
+		return nil, procOutputSpecs[:len(call.Outputs)]
+	} else {
+		return registerUsageSpec(call, nil, jumpRegUseSpec)
+	}
 }
 func (primop *ProcLambdaPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	return call.Next[0], env
@@ -226,6 +231,28 @@ func (primop *JumpPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT
 		env.Set(vart, NodeValue(call.Inputs[i+1], env))
 	}
 	return jumpLambda.Next[0], env
+}
+
+type ProcCallPrimopT struct{}
+
+func (primop *ProcCallPrimopT) Name() string             { return "procCall" }
+func (primop *ProcCallPrimopT) SideEffects() bool        { return false }
+func (primop *ProcCallPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *ProcCallPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
+	return registerUsageSpec(call, jumpRegUseSpec, nil)
+}
+func (primop *ProcCallPrimopT) CalledProc(call *CallNodeT) *CallNodeT {
+	return CalledLambda(call)
+}
+func (primop *ProcCallPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
+	panic("ProcCall.Evaluate")
+	/*
+		procCallLambda := nodeProcCallLambdaValue(call.Inputs[0], env)
+		for i, vart := range procCallLambda.Outputs {
+			env.Set(vart, NodeValue(call.Inputs[i+1], env))
+		}
+		return procCallLambda.Next[0], env
+	*/
 }
 
 type ReturnPrimopT struct{}

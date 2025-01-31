@@ -88,6 +88,9 @@ func IsCallNode(node NodeT) bool      { return node != nil && node.NodeType() ==
 func IsJumpLambdaNode(node NodeT) bool {
 	return node != nil && node.NodeType() == CallNode && node.(*CallNodeT).CallType == JumpLambda
 }
+func IsProcLambdaNode(node NodeT) bool {
+	return node != nil && node.NodeType() == CallNode && node.(*CallNodeT).CallType == ProcLambda
+}
 
 func IsNil(node NodeT) bool {
 	return node == nil || node.IsNil()
@@ -322,6 +325,11 @@ func LookupPrimop(name string) PrimopT {
 		panic(fmt.Sprintf("no primop named '%s'", name))
 	}
 	return primop
+}
+
+// Primops that call a procedure implement this.
+type CallsProcPrimopT interface {
+	CalledProc(*CallNodeT) *CallNodeT // Proc being called.
 }
 
 //----------------------------------------------------------------------------

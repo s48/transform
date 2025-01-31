@@ -163,7 +163,11 @@ func (calls *CallsT) BuildVarCall(primopName string, output *VariableT, inputs .
 }
 
 func (calls *CallsT) BuildNoOutputCall(primopName string, inputs ...any) {
-	calls.AddCall(MakeCall(LookupPrimop(primopName), nil, Map(Nodeify, inputs)...))
+	nodeInputs := Map(Nodeify, inputs)
+	if primopName == "cellSet" && nodeInputs[1].NodeType() == CallNode {
+		nodeInputs[1].(*CallNodeT).Name = nodeInputs[0].(*ReferenceNodeT).Variable.Name
+	}
+	calls.AddCall(MakeCall(LookupPrimop(primopName), nil, nodeInputs...))
 }
 
 func (calls *CallsT) BuildFinalCall(primopName string, exits int, args ...any) *CallNodeT {

@@ -5,6 +5,11 @@
 // This uses a simplified version of Cranelift's register allocator.
 //   https://cfallin.org/blog/2022/06/09/cranelift-regalloc2/
 // One of the simplifications is that it doesn't handle spills (yet).
+//
+// There is one minor added complication.  Cranelift has early and
+// late register use points at each instruction while we have early,
+// middle, and late.  'Middle' uses don't conflict with either early
+// or late and are used for doing interprocedural register allocation.
 
 package cps
 
@@ -56,8 +61,14 @@ type regUseT struct {
 	spec      RegUseSpecT // register constraints
 }
 
+const (
+	EarlyRegUse  = -2
+	MiddleRegUse = -1
+	LateRegUse   = 0
+)
+
 type RegUseSpecT struct {
-	IsEarly      bool // true if the register during the call
+	PhaseOffset  int // -2, -1, 0 for early, middle, and late use
 	Class        *RegisterClassT
 	RegisterMask uint64 // which registers can be used here
 }
@@ -240,8 +251,11 @@ func (bundle *bundleT) initialize() bool {
 // class is used as a stand-in and is later ignored in favor of
 // the actual class given by a primitive.
 
+// This is an 'I don't know' register spec that allows a use to
+// be recorded without specifying what its register class is.
+// Used for jump inputs outputs, hence the name.
 var jumpRegisterClass = &RegisterClassT{Name: "jump", Registers: nil}
-var jumpRegUseSpec = &RegUseSpecT{Class: jumpRegisterClass, IsEarly: true}
+var jumpRegUseSpec = &RegUseSpecT{Class: jumpRegisterClass, PhaseOffset: EarlyRegUse}
 
 //----------------------------------------------------------------
 
@@ -256,6 +270,9 @@ type regBlockT struct {
 
 	bound util.SetT[*VariableT] // bound within the block
 	live  util.SetT[*VariableT] // live at block.start
+
+	// Only in the blocks of procedure nodes.
+	procBound util.SetT[*VariableT] // bound within this procedure
 }
 
 func makeRegBlock() *regBlockT {
@@ -304,7 +321,55 @@ func (block *regBlockT) getEnd() *CallNodeT {
 
 func AllocateRegisters(top *CallNodeT) {
 	makeVarsForLiterals()
-	blocks := FindBasicBlocks[*regBlockT](top, makeRegBlock)
+	procs := []*CallNodeT{}
+	callsTo := map[*CallNodeT]util.SetT[*CallNodeT]{}
+	top.SetFlag(1)
+	for lambda := range Lambdas {
+		if lambda.CallType == ProcLambda && markedAncestor(lambda) != nil {
+			Push(&procs, lambda)
+			callsTo[lambda] = util.NewSet[*CallNodeT]()
+			lambda.SetFlag(1)
+		}
+	}
+	for _, lambda := range procs {
+		if lambda != top {
+			for _, ref := range lambdaBinding(lambda).Refs {
+				callsTo[markedAncestor(ref).(*CallNodeT)].Add(lambda)
+			}
+		}
+	}
+	for _, lambda := range procs {
+		lambda.SetFlag(0)
+	}
+	components := util.StronglyConnectedComponents(procs,
+		func(proc *CallNodeT) []*CallNodeT { return callsTo[proc].Members() })
+
+	/*
+		fmt.Printf("procs")
+		for _, comp := range components {
+			sep := "["
+			for _, lambda := range comp {
+				fmt.Printf("%s%s_%d", sep, lambda.Name, lambda.Id)
+				sep = " "
+			}
+			fmt.Printf("]")
+		}
+		fmt.Printf("\n")
+	*/
+
+	blocks := []*regBlockT{}
+	for _, comp := range components {
+		if len(comp) != 1 {
+			panic("Register allocation found recursion.")
+		}
+		bbs := FindBasicBlocks[*regBlockT](comp[0], makeRegBlock)
+		procBound := util.NewSet[*VariableT]()
+		for _, bb := range bbs {
+			procBound = procBound.Union(bb.bound)
+		}
+		bbs[0].procBound = procBound
+		blocks = append(blocks, bbs...)
+	}
 	index := 0
 	for _, block := range blocks {
 		block.startIndex = index
@@ -337,8 +402,13 @@ func AllocateRegisters(top *CallNodeT) {
 	*/
 
 	allVars := util.NewSet[*VariableT]()
+	procIndex := len(procs) - 1
 	for i := len(blocks) - 1; 0 <= i; i-- {
+		//fmt.Printf(" %s_%d block %d\n", procs[procIndex].Name, procs[procIndex].Id, i)
 		findLiveRanges(blocks[i].start, &allVars)
+		if blocks[i].start == procs[procIndex] {
+			procIndex -= 1
+		}
 	}
 	vars := allVars.Members()
 	// Sort the variables to get deterministic behavior.
@@ -422,8 +492,8 @@ func AllocateRegisters(top *CallNodeT) {
 func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 	ends := map[*VariableT]int{}
 	block := top.Block.(*regBlockT)
-	startIndex := block.startIndex * 2             // early block.start
-	endIndex := startIndex + block.callCount*2 - 1 // late block.end
+	startIndex := block.startIndex * 3             // early block.start
+	endIndex := startIndex + block.callCount*3 - 1 // late block.end
 	/*
 		fmt.Printf("findLiveRanges %d start %d end %d\n", top.Id, startIndex, endIndex)
 		for _, next := range block.next {
@@ -452,10 +522,7 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 			}
 			for i, vart := range call.Outputs {
 				if outputs[i] != nil {
-					index := lateIndex
-					if outputs[i].IsEarly {
-						index -= 1
-					}
+					index := lateIndex + outputs[i].PhaseOffset
 					// fmt.Printf("  %s_%d index %d\n", vart.Name, vart.Id, index)
 					vart.getBundle().addDefinition(index, outputs[i])
 					// +1 for inclusive -> exclusive
@@ -474,10 +541,7 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 				}
 				if IsReferenceNode(input) {
 					vart := input.(*ReferenceNodeT).Variable
-					index := lateIndex
-					if inputs[i].IsEarly {
-						index -= 1
-					}
+					index := lateIndex + inputs[i].PhaseOffset
 					vart.getBundle().addUse(index, inputs[i])
 					_, found := ends[vart]
 					if !found {
@@ -489,11 +553,27 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 				}
 			}
 		}
-		lateIndex -= 2
+		calledProc := getCalledProc(call)
+		if calledProc != nil {
+			bound := calledProc.Block.(*regBlockT).procBound
+			for vart := range bound {
+				vart.getBundle().addInterval(lateIndex+MiddleRegUse, lateIndex+MiddleRegUse)
+			}
+		}
+		lateIndex -= 3
 	}
 	for _, vart := range block.live.Members() {
 		// +1 for inclusive -> exclusive
 		vart.getBundle().addInterval(startIndex, ends[vart]+1)
+	}
+}
+
+func getCalledProc(call *CallNodeT) *CallNodeT {
+	switch primop := call.Primop.(type) {
+	case CallsProcPrimopT:
+		return primop.CalledProc(call)
+	default:
+		return nil
 	}
 }
 

@@ -107,20 +107,8 @@ func source(pos token.Pos) string {
 
 func MakeTopLevelForm(decl *ast.FuncDecl, parsedFiles *ParsedFilesT, globals BindingsT) *CallNodeT {
 	TheFileSet = parsedFiles.FileSet
-	contVar := MakeVariable("c", nil)
-	env := makeEnv(contVar, parsedFiles.TypesInfo, globals)
-	calls := MakeCalls()
-	env.currentBlock.Push(calls)
-	vars := append(makeFieldVars(decl.Type.Params.List, env, calls),
-		makeFieldVars(decl.Type.Results.List, env, calls)...)
-	vars = append([]*VariableT{contVar}, vars...)
-	lambda := MakeLambda(decl.Name.Name, ProcLambda, vars)
-	TopLambda = lambda
-	cpsStmt(decl.Body, env, calls)
-	env.currentBlock.Pop()
-	calls.AddFirst(lambda)
-	CheckNode(lambda)
-	return lambda
+	env := makeEnv(parsedFiles.TypesInfo, globals)
+	return cpsFunc(decl.Name.Name, decl.Type, decl.Body, env.typeInfo.Defs[decl.Name].Type(), env)
 }
 
 func SimplifyTopLevel(lambda *CallNodeT) {

@@ -47,6 +47,7 @@ func main() {
 				lambda := front.MakeTopLevelForm(decl, parsedFiles, front.BindingsT{})
 				front.SimplifyTopLevel(lambda)
 				cps.AllocateRegisters(lambda)
+				cps.PpCps(lambda)
 				lambdas = append(lambdas, lambda)
 			}
 		}
@@ -156,6 +157,9 @@ var allTests = map[string]*testT{
 		testCaseT{[]int{2, 10}, []int{14}},
 		testCaseT{[]int{4, 3}, []int{9}},
 		testCaseT{[]int{20, 10}, []int{200}},
+	}},
+	"call": &testT{cases: []testCaseT{
+		testCaseT{[]int{10}, []int{302}},
 	}},
 }
 

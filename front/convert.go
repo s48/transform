@@ -19,8 +19,8 @@ import (
 // Keeping track of where we are in the Go AST.
 
 type envT struct {
-	// The continuation variable for the procedure being compiled.
-	returnVar *VariableT
+	// A stack of continuation variables to call at returns.
+	returnVars util.StackT[*VariableT]
 	// Type information from the Go front end.
 	typeInfo *types.Info
 	// Source names -> variables from outside of the procedure
@@ -67,8 +67,8 @@ func BindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *Vari
 // a second one for break, and a third for continue.  At this point we don't
 // handle labels for break and continue.
 
-func makeEnv(returnVar *VariableT, typeInfo *types.Info, globals BindingsT) *envT {
-	return &envT{returnVar: returnVar,
+func makeEnv(typeInfo *types.Info, globals BindingsT) *envT {
+	return &envT{
 		typeInfo:         typeInfo,
 		globals:          globals,
 		bindings:         BindingsT{},
@@ -105,6 +105,26 @@ func (env *envT) lookupVar(ident *ast.Ident) *VariableT {
 		return vart
 	}
 	return nil
+}
+
+//----------------------------------------------------------------
+
+func cpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types.Type, env *envT) *CallNodeT {
+	contVar := MakeVariable("c", typ.(*types.Signature).Results())
+	env.returnVars.Push(contVar)
+	calls := MakeCalls()
+	env.currentBlock.Push(calls)
+	vars := append(makeFieldVars(funcType.Params.List, env, calls),
+		makeFieldVars(funcType.Results.List, env, calls)...)
+	vars = append([]*VariableT{contVar}, vars...)
+	lambda := MakeLambda(name, ProcLambda, vars)
+	TopLambda = lambda
+	cpsBlockStmt(body, env, calls)
+	env.returnVars.Pop()
+	env.currentBlock.Pop()
+	calls.AddFirst(lambda)
+	CheckNode(lambda)
+	return lambda
 }
 
 // Make the variables for a procedures arguments and returns.
@@ -219,7 +239,7 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 	case *ast.ReturnStmt:
 		// Use Map to convert []NodeT to []Any to satisfy Go's type checking.
 		values := Map(func(x NodeT) any { return x }, cpsArguments(x.Results, env, calls))
-		values = append([]any{env.returnVar}, values...)
+		values = append([]any{env.returnVars.Top()}, values...)
 		calls.BuildFinalCall("return", 0, values...)
 		calls.SetLastSource(x.Return)
 	case *ast.LabeledStmt:
@@ -619,6 +639,8 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 	case *ast.ArrayType:
 		// The type of the expression is the type expression.
 		return []NodeT{MakeLiteral(nil, env.typeInfo.Types[x].Type)}
+	case *ast.FuncLit: // .Type *FuncType   .Body *BlockStmt
+		return []NodeT{cpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %+v", astNode, astNode))
 	}
@@ -686,7 +708,8 @@ func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 		results[i] = MakeReferenceNode(resultVars[i])
 	}
 	if functionVar != nil {
-		values = append([]NodeT{MakeReferenceNode(functionVar)}, values...)
+		proc := cpsArguments([]ast.Expr{callExpr.Fun}, env, calls)[0]
+		values = append([]NodeT{proc}, values...)
 		primopName = "procCall"
 	}
 	calls.AddPrimopVarsCall(primopName, resultVars, values...)
