@@ -140,6 +140,9 @@ var allTests = map[string]*testT{
 	"slice_sum": &testT{cases: []testCaseT{
 		testCaseT{[]int{}, []int{15}},
 	}},
+	"nested_for": &testT{cases: []testCaseT{
+		testCaseT{[]int{3, 4}, []int{319}},
+	}},
 	"and": &testT{cases: []testCaseT{
 		testCaseT{[]int{1, 4}, []int{7}},     // x < y && y < 10
 		testCaseT{[]int{2, 10}, []int{20}},   // x < y && y !< 10

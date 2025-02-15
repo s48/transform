@@ -110,7 +110,7 @@ func NodeValue(rawNode NodeT, env EnvT) any {
 	case *ReferenceNodeT:
 		return env.Get(node.Variable)
 	case *CallNodeT:
-		if node.CallType != JumpLambda {
+		if node.CallType != JumpLambda && node.CallType != ProcLambda {
 			panic("NodeValue has non-jump lambda node")
 		}
 		return node

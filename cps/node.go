@@ -480,6 +480,7 @@ func CheckNode(topCall *CallNodeT) {
 			}
 			for i, next := range node.Next {
 				if next == nil {
+					fmt.Printf("call %s:%d next is nil: %+v\n", node.Name, node.Id, node)
 					PpCps(node)
 					panic("nil Next call")
 				}

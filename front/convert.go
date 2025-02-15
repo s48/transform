@@ -114,12 +114,17 @@ func cpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types
 	env.returnVars.Push(contVar)
 	calls := MakeCalls()
 	env.currentBlock.Push(calls)
-	vars := append(makeFieldVars(funcType.Params.List, env, calls),
-		makeFieldVars(funcType.Results.List, env, calls)...)
+	vars := makeFieldVars(funcType.Params.List, env, calls)
+	if funcType.Results != nil {
+		vars = append(vars, makeFieldVars(funcType.Results.List, env, calls)...)
+	}
 	vars = append([]*VariableT{contVar}, vars...)
 	lambda := MakeLambda(name, ProcLambda, vars)
 	TopLambda = lambda
 	cpsBlockStmt(body, env, calls)
+	if !calls.HasFinal() {
+		calls.BuildFinalCall("return", 0, contVar)
+	}
 	env.returnVars.Pop()
 	env.currentBlock.Pop()
 	calls.AddFirst(lambda)
@@ -410,7 +415,7 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 	cond NodeT, // the loop ending expression
 	body func(env *envT, calls *CallsT), // adds the body to 'calls'
 	post *CallsT, // executed after the body
-	source token.Pos,
+	position token.Pos,
 	env *envT,
 	calls *CallsT) {
 
@@ -450,7 +455,7 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 	} else {
 		breakCalls := MakeCalls()
 		breakCalls.BuildFinalCall("jump", 0, breakVar)
-		makeIf(cond, bodyCalls, breakCalls, nil, source, env, condCalls)
+		makeIf(cond, bodyCalls, breakCalls, nil, position, env, condCalls)
 		AttachNext(topLambda, condCalls.First)
 	}
 }
@@ -478,13 +483,13 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 
 func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	rangeVal := cpsExpr(rangeStmt.X, env, calls)[0]
-	rangeVar := rangeVal.(*ReferenceNodeT).Variable
-	var rangeLimit NodeT
-	switch rangeVar.Type.(type) {
-	case *types.Slice:
-		rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
-	default:
-		rangeLimit = rangeVal
+	rangeLimit := rangeVal
+	if rangeVal.NodeType() == ReferenceNode {
+		rangeVar := rangeVal.(*ReferenceNodeT).Variable
+		switch rangeVar.Type.(type) {
+		case *types.Slice:
+			rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
+		}
 	}
 	var keyLhs LhsT
 	var valueLhs LhsT
@@ -505,7 +510,7 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	body := func(env *envT, calls *CallsT) {
 		if valueLhs != nil {
 			pointerVar := MakeVariable("v", types.NewPointer(valueLhs.valueType()))
-			calls.BuildVarCall("sliceIndex", pointerVar, rangeVar, keyLhs.read(calls))
+			calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeLimit), keyLhs.read(calls))
 			// calls.SetLastSource(x.Lbrack)
 			valueVar := MakeVariable("v", valueLhs.valueType())
 			calls.BuildVarCall("pointerRef", valueVar, pointerVar)

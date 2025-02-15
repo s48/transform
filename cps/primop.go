@@ -26,7 +26,7 @@ func (reg *registerT) Class() *RegisterClassT { return reg.class }
 func (reg *registerT) String() string         { return reg.name }
 
 const (
-	numRegs     = 5
+	numRegs     = 6
 	allRegsMask = (1 << numRegs) - 1
 )
 

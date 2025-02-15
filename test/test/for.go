@@ -81,3 +81,15 @@ func slice_sum() int {
 	}
 	return r
 }
+
+func nested_for(n int, m int) int {
+	r := 1
+	for i := range n {
+		sum := 0
+		for j := range m {
+			sum += j
+		}
+		r += i*100 + sum
+	}
+	return r
+}

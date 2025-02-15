@@ -36,7 +36,7 @@ func ppCpsLambda(node *CallNodeT, indentTo int, writer *PpCpsWriterT) {
 	writer.Newline()
 	fmt.Fprintf(writer, "%d", node.Id)
 	writer.IndentTo(indentTo)
-	fmt.Fprintf(writer, "(%c %s ", "CPPJ"[node.CallType], callName(node))
+	fmt.Fprintf(writer, "(%c %s ", "CPJ"[node.CallType], callName(node))
 	body := node
 	if body.IsLambda() {
 		writeCallOutputs(node, writer)

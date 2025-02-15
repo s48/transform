@@ -272,7 +272,12 @@ type regBlockT struct {
 	live  util.SetT[*VariableT] // live at block.start
 
 	// Only in the blocks of procedure nodes.
-	procBound util.SetT[*VariableT] // bound within this procedure
+	blocks     []*regBlockT // all the blocks in this procedure
+	callsTo    util.SetT[*CallNodeT]
+	calledFrom util.SetT[*CallNodeT]
+	// All variables bound at some point in this procedure including
+	// those bound in procedures it calls.
+	boundDuring util.SetT[*VariableT]
 }
 
 func makeRegBlock() *regBlockT {
@@ -285,6 +290,11 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	block.start = start
 	block.end = end
 	block.isJump = start.CallType != CallExit
+	if start.CallType == ProcLambda {
+		block.callsTo = util.NewSet[*CallNodeT]()
+		block.calledFrom = util.NewSet[*CallNodeT]()
+		block.boundDuring = util.NewSet[*VariableT]()
+	}
 	call := start
 	count := 1
 	for {
@@ -322,27 +332,46 @@ func (block *regBlockT) getEnd() *CallNodeT {
 func AllocateRegisters(top *CallNodeT) {
 	makeVarsForLiterals()
 	procs := []*CallNodeT{}
-	callsTo := map[*CallNodeT]util.SetT[*CallNodeT]{}
 	top.SetFlag(1)
 	for lambda := range Lambdas {
 		if lambda.CallType == ProcLambda && markedAncestor(lambda) != nil {
 			Push(&procs, lambda)
-			callsTo[lambda] = util.NewSet[*CallNodeT]()
 			lambda.SetFlag(1)
+			bbs := FindBasicBlocks[*regBlockT](lambda, makeRegBlock)
+			lambda.Block.(*regBlockT).blocks = bbs
 		}
 	}
+	// Find which proc calls which others.
 	for _, lambda := range procs {
 		if lambda != top {
 			for _, ref := range lambdaBinding(lambda).Refs {
-				callsTo[markedAncestor(ref).(*CallNodeT)].Add(lambda)
+				caller := markedAncestor(ref).(*CallNodeT)
+				caller.Block.(*regBlockT).callsTo.Add(lambda)
+				lambda.Block.(*regBlockT).calledFrom.Add(caller)
 			}
 		}
 	}
 	for _, lambda := range procs {
 		lambda.SetFlag(0)
+		findBoundDuring(lambda)
 	}
+
+	// We need to allocate registers for called procedures before
+	// those in the calling procedures.  The strongly-connected
+	// components have a top-down order, and since we allocate from
+	// bottom to top, that order works.
 	components := util.StronglyConnectedComponents(procs,
-		func(proc *CallNodeT) []*CallNodeT { return callsTo[proc].Members() })
+		func(proc *CallNodeT) []*CallNodeT { return proc.Block.(*regBlockT).callsTo.Members() })
+
+	blocks := []*regBlockT{}
+	for _, comp := range components {
+		if len(comp) != 1 {
+			// Recursion requires dividing registers into caller saves
+			// and callee saves.  A problem for another day.
+			panic("Register allocation found recursion - time to write more code.")
+		}
+		blocks = append(blocks, comp[0].Block.(*regBlockT).blocks...)
+	}
 
 	/*
 		fmt.Printf("procs")
@@ -357,19 +386,6 @@ func AllocateRegisters(top *CallNodeT) {
 		fmt.Printf("\n")
 	*/
 
-	blocks := []*regBlockT{}
-	for _, comp := range components {
-		if len(comp) != 1 {
-			panic("Register allocation found recursion.")
-		}
-		bbs := FindBasicBlocks[*regBlockT](comp[0], makeRegBlock)
-		procBound := util.NewSet[*VariableT]()
-		for _, bb := range bbs {
-			procBound = procBound.Union(bb.bound)
-		}
-		bbs[0].procBound = procBound
-		blocks = append(blocks, bbs...)
-	}
 	index := 0
 	for _, block := range blocks {
 		block.startIndex = index
@@ -489,6 +505,33 @@ func AllocateRegisters(top *CallNodeT) {
 	}
 }
 
+// 1. Collect all variables bound within the procedure.
+// 2. Propagate the boundDuring set up the calledBy links.
+
+func findBoundDuring(proc *CallNodeT) {
+	block := proc.Block.(*regBlockT)
+	bound := block.boundDuring
+	for _, bb := range block.blocks {
+		bound = bound.Union(bb.bound)
+	}
+	block.boundDuring = bound
+	propagateBoundDuring(proc)
+}
+
+func propagateBoundDuring(proc *CallNodeT) {
+	block := proc.Block.(*regBlockT)
+	bound := block.boundDuring
+	for caller := range block.calledFrom {
+		callerBlock := caller.Block.(*regBlockT)
+		before := callerBlock.boundDuring
+		after := before.Union(bound)
+		if len(before) < len(after) {
+			callerBlock.boundDuring = after
+			propagateBoundDuring(caller)
+		}
+	}
+}
+
 func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 	ends := map[*VariableT]int{}
 	block := top.Block.(*regBlockT)
@@ -555,7 +598,7 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 		}
 		calledProc := getCalledProc(call)
 		if calledProc != nil {
-			bound := calledProc.Block.(*regBlockT).procBound
+			bound := calledProc.Block.(*regBlockT).boundDuring
 			for vart := range bound {
 				vart.getBundle().addInterval(lateIndex+MiddleRegUse, lateIndex+MiddleRegUse)
 			}
