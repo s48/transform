@@ -510,7 +510,7 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	body := func(env *envT, calls *CallsT) {
 		if valueLhs != nil {
 			pointerVar := MakeVariable("v", types.NewPointer(valueLhs.valueType()))
-			calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeLimit), keyLhs.read(calls))
+			calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
 			// calls.SetLastSource(x.Lbrack)
 			valueVar := MakeVariable("v", valueLhs.valueType())
 			calls.BuildVarCall("pointerRef", valueVar, pointerVar)
@@ -644,10 +644,27 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 	case *ast.ArrayType:
 		// The type of the expression is the type expression.
 		return []NodeT{MakeLiteral(nil, env.typeInfo.Types[x].Type)}
+	case *ast.SliceExpr:
+		slice := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
+		var low NodeT
+		if x.Low == nil {
+			low = MakeLiteral(big.NewInt(0), types.Typ[types.Int])
+		} else {
+			low = cpsArguments([]ast.Expr{x.Low}, env, calls)[0]
+		}
+		var high NodeT
+		if x.High == nil {
+			high = makeExprTypeCall("len", x.Rbrack, types.Typ[types.Int], env, calls, CopyNodeTree(slice))[0]
+		} else {
+			high = cpsArguments([]ast.Expr{x.High}, env, calls)[0]
+		}
+		size := makeExprTypeCall("-", x.Rbrack, types.Typ[types.Int], env, calls, high, CopyNodeTree(low))[0]
+		pointer := makeExprCall("sliceIndex", x.Lbrack, x.X, env, calls, slice, low)[0]
+		return makeExprCall("makeSlice", x.Lbrack, x, env, calls, pointer, size)
 	case *ast.FuncLit: // .Type *FuncType   .Body *BlockStmt
 		return []NodeT{cpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
 	default:
-		panic(fmt.Sprintf("unrecognized expression %T %+v", astNode, astNode))
+		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
 	}
 	return nil
 }
@@ -732,7 +749,17 @@ func makeExprCall(primop string,
 	calls *CallsT,
 	inputs ...NodeT) []NodeT {
 
-	result := MakeVariable("v", env.typeInfo.Types[expr].Type)
+	return makeExprTypeCall(primop, source, env.typeInfo.Types[expr].Type, env, calls, inputs...)
+}
+
+func makeExprTypeCall(primop string,
+	source token.Pos,
+	resultType types.Type,
+	env *envT,
+	calls *CallsT,
+	inputs ...NodeT) []NodeT {
+
+	result := MakeVariable("v", resultType)
 	calls.AddPrimopVarsCall(primop, []*VariableT{result}, inputs...)
 	calls.SetLastSource(source)
 	return []NodeT{MakeReferenceNode(result)}
@@ -780,9 +807,9 @@ func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 		switch xType := typeAndValue.Type.Underlying().(type) {
 		case *types.Slice:
 			pointerVar := MakeVariable("v", types.NewPointer(xType.Elem()))
-			calls.BuildVarCall("SliceIndex", pointerVar, values[0], values[1])
+			calls.BuildVarCall("sliceIndex", pointerVar, values[0], values[1])
 			calls.SetLastSource(x.Lbrack)
-			return &PointerLhsT{"PointerRef", "PointerSet", pointerVar, x.Lbrack}
+			return &PointerLhsT{"pointerRef", "PointerSet", pointerVar, x.Lbrack}
 		default:
 			panic("Indexed LHS of unexpected type at " + source(astNode.Pos()))
 		}

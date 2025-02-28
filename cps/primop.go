@@ -149,7 +149,7 @@ func (primop *LetPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*Reg
 }
 func (primop *LetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
 	for i, vart := range call.Outputs {
-		env.Set(vart, nodeJumpLambdaValue(call.Inputs[i], env))
+		env.Set(vart, nodeLambdaValue(call.Inputs[i], env))
 	}
 	return call.Next[0], env
 }
@@ -237,7 +237,7 @@ type ProcCallPrimopT struct{}
 
 func (primop *ProcCallPrimopT) Name() string             { return "procCall" }
 func (primop *ProcCallPrimopT) SideEffects() bool        { return false }
-func (primop *ProcCallPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *ProcCallPrimopT) Simplify(call *CallNodeT) { SimplifyProcCall(call) }
 func (primop *ProcCallPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	return registerUsageSpec(call, jumpRegUseSpec, nil)
 }
@@ -245,14 +245,12 @@ func (primop *ProcCallPrimopT) CalledProc(call *CallNodeT) *CallNodeT {
 	return CalledLambda(call)
 }
 func (primop *ProcCallPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
-	panic("ProcCall.Evaluate")
-	/*
-		procCallLambda := nodeProcCallLambdaValue(call.Inputs[0], env)
-		for i, vart := range procCallLambda.Outputs {
-			env.Set(vart, NodeValue(call.Inputs[i+1], env))
-		}
-		return procCallLambda.Next[0], env
-	*/
+	procCallLambda := nodeProcLambdaValue(call.Inputs[0], env)
+	env.Set(procCallLambda.Outputs[0], call)
+	for i, vart := range procCallLambda.Outputs[1:] {
+		env.Set(vart, NodeValue(call.Inputs[i+1], env))
+	}
+	return procCallLambda.Next[0], env
 }
 
 type ReturnPrimopT struct{}
@@ -268,7 +266,11 @@ func (primop *ReturnPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*
 	return inputs, nil
 }
 func (primop *ReturnPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
-	return nil, env
+	contLambda := nodeLambdaValue(call.Inputs[0], env, CallExit)
+	for i, vart := range contLambda.Outputs {
+		env.Set(vart, NodeValue(call.Inputs[i+1], env))
+	}
+	return contLambda.Next[0], env
 }
 
 // Load a register with an immediage value.

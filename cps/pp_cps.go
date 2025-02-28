@@ -194,7 +194,7 @@ func printCallName(node *CallNodeT, writer *PpCpsWriterT) {
 }
 
 func callName(node *CallNodeT) string {
-	return fmt.Sprintf("%s %d", node.Name, node.Id)
+	return fmt.Sprintf("%s_%d", node.Name, node.Id)
 }
 
 func writeCallInputs(call *CallNodeT, start int, writer *PpCpsWriterT) {

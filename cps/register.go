@@ -16,6 +16,7 @@ package cps
 import (
 	"fmt"
 	"math/bits"
+	"math/rand"
 	"slices"
 	"sort"
 
@@ -467,11 +468,7 @@ func AllocateRegisters(top *CallNodeT) {
 		regAlloc := regAllocQueue.Dequeue()
 		okay := false
 		mask := regAlloc.allowedRegsMask
-		for mask != 0 {
-			i := bits.TrailingZeros64(mask)
-			if i == 64 {
-				break
-			}
+		for i := startBit(mask); mask != 0; i = nextBit(mask, i) {
 			reg := regAlloc.Class.Registers[i]
 			regLiveRange := regLiveRanges[reg]
 			if regLiveRange == nil || !regLiveRange.conflicts(&regAlloc.liveRange) {
@@ -503,6 +500,39 @@ func AllocateRegisters(top *CallNodeT) {
 	for _, vart := range vars {
 		vart.Register = vart.bundle.regAlloc.Register
 	}
+}
+
+func startBit(mask uint64) int {
+	index := rand.Intn(bits.OnesCount64(mask))
+	bit := 0
+	for {
+		if mask&1 == 1 {
+			if index == 0 {
+				break
+			}
+			index -= 1
+		}
+		mask >>= 1
+		bit += 1
+	}
+	return bit
+}
+
+func nextBit(mask uint64, bit int) int {
+	bit += 1
+	temp := mask >> bit
+	for {
+		if temp == 0 {
+			temp = mask
+			bit = 0
+		}
+		if temp&1 == 1 {
+			break
+		}
+		temp >>= 1
+		bit += 1
+	}
+	return bit
 }
 
 // 1. Collect all variables bound within the procedure.

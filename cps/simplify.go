@@ -62,7 +62,7 @@ func SimplifyNext(call *CallNodeT) {
 
 func SimplifyLet(call *CallNodeT) {
 	if len(call.Outputs) != len(call.Inputs) {
-		panic("wrong number of inputs in call")
+		panic("wrong number of inputs in call " + CallString(call))
 	}
 	if len(call.Inputs) == 0 {
 		RemoveCall(call)
@@ -150,6 +150,14 @@ func SimplifyJump(call *CallNodeT) {
 	}
 }
 
+func SimplifyProcCall(call *CallNodeT) {
+	if IsCallNode(call.Inputs[0]) {
+		InlineProcedure(call, call.Inputs[0].(*CallNodeT))
+	} else {
+		DefaultSimplify(call)
+	}
+}
+
 // Remove values whose vars are not referenced and substitute
 // those that have only one reference.
 
@@ -191,7 +199,8 @@ func substituteLetrec(vart *VariableT, val *CallNodeT) bool {
 			ReplaceInput(vart.Refs[0], val)
 		}
 		return true
-	} else if val.CallType == JumpLambda && len(val.Next[0].Next) == 0 {
+	} else if val.CallType == JumpLambda && len(val.Next[0].Next) == 0 ||
+		vart.Flags["substitute"] != nil {
 		Substitute(vart, val, true)
 		return true
 	}
@@ -391,7 +400,9 @@ func InlineProcedure(call *CallNodeT, proc *CallNodeT) {
 	setOutputs(call, proc.Outputs)
 	setOutputs(proc, callOutputs)
 
-	ReplaceInput(call.Inputs[0], proc)
+	if call.Inputs[0] != proc {
+		ReplaceInput(call.Inputs[0], proc)
+	}
 	call.Primop = LookupPrimop("let")
 	MarkChanged(call)
 }

@@ -47,7 +47,6 @@ func main() {
 				lambda := front.MakeTopLevelForm(decl, parsedFiles, front.BindingsT{})
 				front.SimplifyTopLevel(lambda)
 				cps.AllocateRegisters(lambda)
-				cps.PpCps(lambda)
 				lambdas = append(lambdas, lambda)
 			}
 		}

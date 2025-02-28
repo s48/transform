@@ -276,9 +276,9 @@ func copyCall(node *CallNodeT) *CallNodeT {
 	for i, next := range node.Next {
 		AttachNext(newNode, CopyNodeTree(next).(*CallNodeT), i)
 	}
-	for _, newVar := range outputs {
-		if newVar != nil {
-			newVar.Copy = nil
+	for _, oldVar := range node.Outputs {
+		if oldVar != nil {
+			oldVar.Copy = nil
 		}
 	}
 	if node.IsLambda() {

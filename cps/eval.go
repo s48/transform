@@ -25,11 +25,12 @@ func RegEvaluate(proc *CallNodeT, args []int) []int {
 }
 
 func evaluate(proc *CallNodeT, args []int, env EnvT) []int {
+	contVar := proc.Outputs[0]
 	for i, arg := range args {
 		env.Set(proc.Outputs[i+1], arg)
 	}
 	call := proc
-	for call.Primop.Name() != "return" {
+	for !isFinalReturn(call, contVar) {
 		// fmt.Printf("eval %d %s\n", call.Id, call.Primop.Name())
 		call, env = call.Primop.(EvalPrimopT).Evaluate(call, env)
 	}
@@ -39,6 +40,11 @@ func evaluate(proc *CallNodeT, args []int, env EnvT) []int {
 		results[i] = nodeIntValue(value, env)
 	}
 	return results
+}
+
+func isFinalReturn(call *CallNodeT, contVar *VariableT) bool {
+	return call.Primop.Name() == "return" &&
+		call.Inputs[0].(*ReferenceNodeT).Variable == contVar
 }
 
 type EvalPrimopT interface {
@@ -138,11 +144,24 @@ func nodeBoolValue(node NodeT, env EnvT) bool {
 }
 
 func nodeJumpLambdaValue(node NodeT, env EnvT) *CallNodeT {
+	return nodeLambdaValue(node, env, JumpLambda)
+}
+
+func nodeProcLambdaValue(node NodeT, env EnvT) *CallNodeT {
+	return nodeLambdaValue(node, env, ProcLambda)
+}
+
+func nodeLambdaValue(node NodeT, env EnvT, optionalCallType ...CallTypeT) *CallNodeT {
 	switch value := NodeValue(node, env).(type) {
 	case *CallNodeT:
+		if 0 < len(optionalCallType) &&
+			value.CallType != optionalCallType[0] {
+
+			panic("node value is not the right kind of lambda " + node.String())
+		}
 		return value
 	default:
-		panic("node value is not a jump lambda: " + node.String())
+		panic("node value is not a lambda: " + node.String())
 	}
 }
 

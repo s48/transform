@@ -38,7 +38,7 @@ func (files *ParsedFilesT) ParseFile(fileName string, fileContents []byte) {
 	file, err := parser.ParseFile(files.FileSet,
 		fileName,
 		fileContents,
-		parser.SkipObjectResolution)
+		parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
 		panic(err)
 	}
