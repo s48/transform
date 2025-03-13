@@ -239,7 +239,7 @@ func (primop *ProcCallPrimopT) Name() string             { return "procCall" }
 func (primop *ProcCallPrimopT) SideEffects() bool        { return false }
 func (primop *ProcCallPrimopT) Simplify(call *CallNodeT) { SimplifyProcCall(call) }
 func (primop *ProcCallPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
-	return registerUsageSpec(call, jumpRegUseSpec, nil)
+	return registerUsageSpec(call, jumpRegUseSpec, outputSpec)
 }
 func (primop *ProcCallPrimopT) CalledProc(call *CallNodeT) *CallNodeT {
 	return CalledLambda(call)
