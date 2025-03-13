@@ -109,6 +109,14 @@ func (env *envT) lookupVar(ident *ast.Ident) *VariableT {
 
 //----------------------------------------------------------------
 
+type CompilatorT interface {
+	ToCps(args []NodeT, resultVars []*VariableT, source token.Pos, calls *CallsT)
+}
+
+var Compilators = map[string]CompilatorT{}
+
+//----------------------------------------------------------------
+
 func cpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types.Type, env *envT) *CallNodeT {
 	contVar := MakeVariable("c", typ.(*types.Signature).Results())
 	env.returnVars.Push(contVar)
@@ -734,8 +742,13 @@ func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 		values = append([]NodeT{proc}, values...)
 		primopName = "procCall"
 	}
-	calls.AddPrimopVarsCall(primopName, resultVars, values...)
-	calls.SetLastSource(callExpr.Lparen)
+	compilator := Compilators[primopName]
+	if compilator == nil {
+		calls.AddPrimopVarsCall(primopName, resultVars, values...)
+		calls.SetLastSource(callExpr.Lparen)
+	} else {
+		compilator.ToCps(values, resultVars, callExpr.Lparen, calls)
+	}
 	return results
 }
 
