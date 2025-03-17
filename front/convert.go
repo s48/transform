@@ -109,14 +109,6 @@ func (env *envT) lookupVar(ident *ast.Ident) *VariableT {
 
 //----------------------------------------------------------------
 
-type CompilatorT interface {
-	ToCps(args []NodeT, resultVars []*VariableT, source token.Pos, calls *CallsT)
-}
-
-var Compilators = map[string]CompilatorT{}
-
-//----------------------------------------------------------------
-
 func cpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types.Type, env *envT) *CallNodeT {
 	contVar := MakeVariable("c", typ.(*types.Signature).Results())
 	env.returnVars.Push(contVar)
@@ -363,7 +355,7 @@ func cpsBlockLabels(labels []*ast.Ident, blocks [][]ast.Stmt, env *envT, calls *
 		}
 	}
 	calls.AddPrimopVarsCall("letrec", vars, lambdas...)
-	calls.AddCalls(firstBlock)
+	calls.AppendCalls(firstBlock)
 	calls.Last = lastBlockLast
 }
 
@@ -601,16 +593,27 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		typeAndValue := env.typeInfo.Types[x]
 		if typeAndValue.IsValue() && typeAndValue.Value != nil {
 			return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
-		} else {
-			vart := env.lookupVar(x)
-			if vart == nil {
+		}
+		vart := env.lookupVar(x)
+		if vart == nil {
+			// It's an import.  For now we assume it's a primop.
+			// Uses[x] is non-nil for source packages (e.g. vpu) and
+			// nil for 'len'.  Defs[x] is also nil for 'len'.  The
+			// 'builtin' package has documentation for all of Go's
+			// builtin names, but I can't find a programatic list
+			// anywhere.
+			primop := LookupPrimop(x.Name)
+			if primop == nil {
 				panic(fmt.Sprintf("unbound variable %s", x.Name))
 			}
-			if vart.HasFlag("cell") {
-				vart = calls.BuildCall("cellRef", vart.Name, vart.Type, vart)
-			}
-			return []NodeT{MakeReferenceNode(vart)}
+			vart = MakeVariable(x.Name, typeAndValue.Type, x.Pos())
+			vart.Flags["global"] = true
+			vart.Flags["primop"] = primop
 		}
+		if vart.HasFlag("cell") {
+			vart = calls.BuildCall("cellRef", vart.Name, vart.Type, vart)
+		}
+		return []NodeT{MakeReferenceNode(vart)}
 	case *ast.BasicLit:
 		if x.Kind == token.INT {
 			n, success := new(big.Int).SetString(x.Value, 0)
@@ -646,7 +649,13 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 			return makeExprCall(x.Op.String(), x.OpPos, x, env, calls, inputs...)
 		}
 	case *ast.IndexExpr:
-		return []NodeT{cpsLhs(x, false, env, calls).read(calls)}
+		// If this is a generic being applied to a type we ignore the
+		// index.  The type checker has already taken it into account.
+		if env.typeInfo.Types[x.Index].IsType() {
+			return cpsExpr(x.X, env, calls)
+		} else {
+			return []NodeT{cpsLhs(x, false, env, calls).read(calls)}
+		}
 	case *ast.CallExpr:
 		return cpsCallExpr(x, env, calls)
 	case *ast.ArrayType:
@@ -667,7 +676,8 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 			high = cpsArguments([]ast.Expr{x.High}, env, calls)[0]
 		}
 		size := makeExprTypeCall("-", x.Rbrack, types.Typ[types.Int], env, calls, high, CopyNodeTree(low))[0]
-		pointer := makeExprCall("sliceIndex", x.Lbrack, x.X, env, calls, slice, low)[0]
+		pointerType := types.NewPointer(env.typeInfo.Types[x.X].Type)
+		pointer := makeExprTypeCall("sliceIndex", x.Lbrack, pointerType, env, calls, slice, low)[0]
 		return makeExprCall("makeSlice", x.Lbrack, x, env, calls, pointer, size)
 	case *ast.FuncLit: // .Type *FuncType   .Body *BlockStmt
 		return []NodeT{cpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
@@ -707,21 +717,7 @@ func cpsAndOrExpr(binaryExpr *ast.BinaryExpr, env *envT, calls *CallsT) []NodeT 
 
 func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 	values := cpsArguments(callExpr.Args, env, calls)
-	var primopName string
-	var functionVar *VariableT
-	switch fun := callExpr.Fun.(type) {
-	case *ast.SelectorExpr:
-		panic("got selector expr")
-		primopName = fun.Sel.Name
-	case *ast.Ident:
-		// env.typeInfo.Uses[fun] returns an Object (an interface), which
-		// can be a package, constant, type, variable, function (incl.
-		// methods), or label, all of which implement that interface.
-		functionVar = env.lookupVar(fun)
-		primopName = fun.Name
-	default:
-		panic("unrecognized function in call")
-	}
+	fun := cpsExpr(callExpr.Fun, env, calls)
 	var resultTypes []types.Type
 	switch resultType := env.typeInfo.Types[callExpr].Type.(type) {
 	case *types.Tuple:
@@ -737,18 +733,14 @@ func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 		resultVars[i] = MakeVariable("v", typ)
 		results[i] = MakeReferenceNode(resultVars[i])
 	}
-	if functionVar != nil {
-		proc := cpsArguments([]ast.Expr{callExpr.Fun}, env, calls)[0]
-		values = append([]NodeT{proc}, values...)
-		primopName = "procCall"
+	funVar := fun[0].(*ReferenceNodeT).Variable
+	primop := funVar.Flags["primop"]
+	if primop == nil {
+		values = append(fun, values...)
+		primop = LookupPrimop("procCall")
 	}
-	compilator := Compilators[primopName]
-	if compilator == nil {
-		calls.AddPrimopVarsCall(primopName, resultVars, values...)
-		calls.SetLastSource(callExpr.Lparen)
-	} else {
-		compilator.ToCps(values, resultVars, callExpr.Lparen, calls)
-	}
+	calls.AddCall(primop.(PrimopT), resultVars, values)
+	calls.SetLastSource(callExpr.Lparen)
 	return results
 }
 

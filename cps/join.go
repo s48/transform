@@ -175,7 +175,7 @@ func doJoinSubstitute(vart *VariableT, val *CallNodeT) bool {
 			nextCall := call.Next[0]
 			DetachNext(call)
 			AttachNext(callParent, DetachNext(nextCall))
-			block.AddCall(call)
+			block.AppendCall(call)
 			call.SetIsSimplified(false)
 			call = nextCall
 		} else {

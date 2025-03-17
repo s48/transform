@@ -80,6 +80,7 @@ func MarkChanged(node NodeT) {
 type CallsT struct {
 	First    *CallNodeT // The first
 	Last     *CallNodeT // and last calls in a block.
+	recent   *CallNodeT // start of most recently added calls, for adding source
 	contents string     // A debug string that lists the IDs of the calls
 }
 
@@ -95,13 +96,9 @@ func (calls *CallsT) HasFinal() bool {
 	return calls.Last != nil && len(calls.Last.Next) != 1
 }
 
-func (calls *CallsT) SetLastSource(source token.Pos) {
-	calls.Last.source = source
-}
-
-func (calls *CallsT) AddCalls(more *CallsT) {
+func (calls *CallsT) AppendCalls(more *CallsT) {
 	calls.contents = fmt.Sprintf("%s [%s]", calls.contents, more.contents)
-	// fmt.Printf("AddCalls %s\n", calls.contents)
+	// fmt.Printf("AppendCalls %s\n", calls.contents)
 	if more == nil {
 		return // nothing to do
 	}
@@ -124,9 +121,9 @@ func (calls *CallsT) AddFirst(call *CallNodeT) {
 	calls.First = call
 }
 
-func (calls *CallsT) AddCall(call *CallNodeT) {
+func (calls *CallsT) AppendCall(call *CallNodeT) {
 	calls.contents = fmt.Sprintf("%s %d", calls.contents, call.Id)
-	// fmt.Printf("AddCall %s\n  %s\n", calls.contents, CallString(call))
+	// fmt.Printf("AppendCall %s\n  %s\n", calls.contents, CallString(call))
 	if calls.First == nil {
 		calls.First = call
 	} else {
@@ -146,20 +143,53 @@ func (calls *CallsT) SetLast(call *CallNodeT) {
 	calls.Last = call
 }
 
+func (calls *CallsT) SetLastSource(source token.Pos) {
+	for call := calls.recent; ; call = call.Next[0] {
+		call.source = source
+		for _, vart := range call.Outputs {
+			if vart != nil && vart.Source == 0 {
+				vart.Source = source
+			}
+		}
+		if call == calls.Last {
+			break
+		}
+	}
+}
+
 // Various utilities calls for making nodes.
 
+type CompilatorT interface {
+	ToCps(args []NodeT, resultVars []*VariableT, calls *CallsT)
+}
+
+func (calls *CallsT) AddCall(primop PrimopT, outputs []*VariableT, inputs []NodeT) {
+	oldLast := calls.Last
+	switch primop := primop.(type) {
+	case CompilatorT:
+		primop.ToCps(inputs, outputs, calls)
+	default:
+		calls.AppendCall(MakeCall(primop, outputs, inputs...))
+	}
+	if oldLast == nil {
+		calls.recent = calls.First
+	} else {
+		calls.recent = oldLast.Next[0]
+	}
+}
+
 func (calls *CallsT) AddPrimopVarsCall(primopName string, outputs []*VariableT, inputs ...NodeT) {
-	calls.AddCall(MakeCall(LookupPrimop(primopName), outputs, inputs...))
+	calls.AddCall(LookupPrimop(primopName), outputs, inputs)
 }
 
 func (calls *CallsT) BuildCall(primopName string, outputName string, outputType types.Type, inputs ...any) *VariableT {
 	output := MakeVariable(outputName, outputType)
-	calls.AddCall(MakeCall(LookupPrimop(primopName), []*VariableT{output}, Map(Nodeify, inputs)...))
+	calls.AddCall(LookupPrimop(primopName), []*VariableT{output}, Map(Nodeify, inputs))
 	return output
 }
 
 func (calls *CallsT) BuildVarCall(primopName string, output *VariableT, inputs ...any) {
-	calls.AddCall(MakeCall(LookupPrimop(primopName), []*VariableT{output}, Map(Nodeify, inputs)...))
+	calls.AddCall(LookupPrimop(primopName), []*VariableT{output}, Map(Nodeify, inputs))
 }
 
 func (calls *CallsT) BuildNoOutputCall(primopName string, inputs ...any) {
@@ -167,7 +197,7 @@ func (calls *CallsT) BuildNoOutputCall(primopName string, inputs ...any) {
 	if primopName == "cellSet" && nodeInputs[1].NodeType() == CallNode {
 		nodeInputs[1].(*CallNodeT).Name = nodeInputs[0].(*ReferenceNodeT).Variable.Name
 	}
-	calls.AddCall(MakeCall(LookupPrimop(primopName), nil, nodeInputs...))
+	calls.AddCall(LookupPrimop(primopName), nil, nodeInputs)
 }
 
 func (calls *CallsT) BuildFinalCall(primopName string, exits int, args ...any) *CallNodeT {
@@ -177,7 +207,8 @@ func (calls *CallsT) BuildFinalCall(primopName string, exits int, args ...any) *
 	for i, next := range argNodes[0:exits] {
 		AttachNext(call, next.(*CallNodeT), i)
 	}
-	calls.AddCall(call)
+	calls.AppendCall(call)
+	calls.recent = call
 	return call
 }
 
