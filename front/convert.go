@@ -23,9 +23,9 @@ type envT struct {
 	returnVars util.StackT[*VariableT]
 	// Type information from the Go front end.
 	typeInfo *types.Info
-	// Source names -> variables from outside of the procedure
-	globals BindingsT
-	// Source names -> variables from within the procedure
+	// types.Obj -> package variable
+	packageBindings PackageBindingsT
+	// types.Obj -> lexically-bound variable
 	bindings BindingsT
 	// For adding 'makeCell' calls at the beginning.
 	currentBlock util.StackT[*CallsT]
@@ -53,6 +53,10 @@ func BindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *Vari
 	return vart
 }
 
+type PackageBindingsT interface {
+	LookupVar(obj types.Object) *VariableT
+}
+
 // 'break' with a label means to jump to the statement after the labeled for/switch/select
 //    label foo:
 //    statement {
@@ -67,10 +71,10 @@ func BindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *Vari
 // a second one for break, and a third for continue.  At this point we don't
 // handle labels for break and continue.
 
-func makeEnv(typeInfo *types.Info, globals BindingsT) *envT {
+func MakeEnv(typeInfo *types.Info, pkgBindings PackageBindingsT) *envT {
 	return &envT{
 		typeInfo:         typeInfo,
-		globals:          globals,
+		packageBindings:  pkgBindings,
 		bindings:         BindingsT{},
 		continueBindings: BindingsT{},
 		breakBindings:    BindingsT{}}
@@ -100,16 +104,12 @@ func (env *envT) lookupVar(ident *ast.Ident) *VariableT {
 	if found {
 		return vart
 	}
-	vart, found = env.globals[obj]
-	if found {
-		return vart
-	}
-	return nil
+	return env.packageBindings.LookupVar(obj)
 }
 
 //----------------------------------------------------------------
 
-func cpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types.Type, env *envT) *CallNodeT {
+func CpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types.Type, env *envT) *CallNodeT {
 	contVar := MakeVariable("c", typ.(*types.Signature).Results())
 	env.returnVars.Push(contVar)
 	calls := MakeCalls()
@@ -680,7 +680,23 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		pointer := makeExprTypeCall("sliceIndex", x.Lbrack, pointerType, env, calls, slice, low)[0]
 		return makeExprCall("makeSlice", x.Lbrack, x, env, calls, pointer, size)
 	case *ast.FuncLit: // .Type *FuncType   .Body *BlockStmt
-		return []NodeT{cpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
+		return []NodeT{CpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
+	case *ast.SelectorExpr:
+		switch base := x.X.(type) {
+		case *ast.Ident:
+			typeAndValue := env.typeInfo.Types[x]
+			if typeAndValue.IsValue() && typeAndValue.Value != nil {
+				return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
+			}
+			switch object := env.typeInfo.Uses[base].(type) {
+			case *types.PkgName:
+				return []NodeT{MakeReferenceNode(env.lookupVar(x.Sel))}
+			default:
+				panic(fmt.Sprintf("unhandled type of selector Ident: '%+v'", object))
+			}
+		default:
+			panic(fmt.Sprintf("unhandled type of selector base: '%+v'", base))
+		}
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
 	}
