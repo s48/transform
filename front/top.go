@@ -166,8 +166,13 @@ func (frontEnd *FrontEndT) ImportFrom(path string,
 func (frontEnd *FrontEndT) ParseAndTypeCheck() {
 	frontEnd.readFiles(frontEnd.BuiltinPackages)
 	frontEnd.readFiles(frontEnd.Packages)
-	frontEnd.typeCheck(frontEnd.BuiltinPackages)
-	frontEnd.typeCheck(frontEnd.Packages)
+	conf := &types.Config{Importer: frontEnd}
+	for _, pkg := range frontEnd.BuiltinPackages {
+		frontEnd.typeCheckPackage(pkg, conf)
+	}
+	for _, pkg := range frontEnd.Packages {
+		frontEnd.typeCheckPackage(pkg, conf)
+	}
 }
 
 func (frontEnd *FrontEndT) readFiles(pkgs []*PackageT) {
@@ -199,17 +204,17 @@ func (frontEnd *FrontEndT) ParseFile(filename string, contents []byte) *ast.File
 	return astFile
 }
 
-// Go in reverse order so that imports get checked before importers.
-
-func (frontEnd *FrontEndT) typeCheck(pkgs []*PackageT) {
-	conf := &types.Config{Importer: frontEnd}
-	for i := range pkgs {
-		pkg := pkgs[len(pkgs)-i-1]
-		frontEnd.typeCheckPackage(pkg, conf)
-	}
-}
-
 func (frontEnd *FrontEndT) typeCheckPackage(pkg *PackageT, conf *types.Config) {
+	if pkg.TypesPackage != nil {
+		return
+	}
+	// Imports must be checked first.
+	for _, imported := range pkg.BuildPackage.Imports {
+		_, pkg := frontEnd.findImportPackage(imported, pkg.BuildPackage.Dir)
+		if pkg != nil {
+			frontEnd.typeCheckPackage(pkg, conf)
+		}
+	}
 	typesPackage, err :=
 		conf.Check(pkg.PackagePath, frontEnd.FileSet, pkg.AstFiles, frontEnd.TypesInfo)
 	if err != nil {
