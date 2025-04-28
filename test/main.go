@@ -10,51 +10,61 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	"go/ast"
+	"go/types"
 
 	"github.com/s48/transform/cps"
 	"github.com/s48/transform/front"
 )
 
 func main() {
-	goFilename := flag.String("go", "", "Go file")
 	goFunction := flag.String("func", "", "Go function")
 	flag.Parse()
 
 	cps.DefinePrimops()
 
-	source := "test/" + *goFilename + ".go"
-	in, err := os.ReadFile(source)
-	if err != nil {
-		if os.IsNotExist(err) {
-			panic(fmt.Sprintf("%s: File not found.\n", source))
-		} else {
-			panic(fmt.Sprintf("Error reading file: %v", err))
-		}
-	}
+	frontEnd := front.MakeFrontEnd(nil)
+	frontEnd.LoadPackage("/home/kelsey/me/git/transform/test/test")
+	frontEnd.ParseAndTypeCheck()
 
-	parsedFiles := front.NewParsedFiles("test", "./...")
-	parsedFiles.ParseFile(source, in)
-	parsedFiles.TypeCheck()
-
-	lambdas := []*cps.CallNodeT{}
-	for _, rawDecl := range parsedFiles.AstFiles[0].Decls {
-		switch decl := rawDecl.(type) {
-		case *ast.FuncDecl:
-			if *goFunction == "" || *goFunction == decl.Name.Name {
-				lambda := front.MakeTopLevelForm(decl, parsedFiles, front.BindingsT{})
-				front.SimplifyTopLevel(lambda)
-				cps.AllocateRegisters(lambda)
-				lambdas = append(lambdas, lambda)
+	var testDecls []*ast.FuncDecl
+	for _, astFile := range frontEnd.Packages[0].AstFiles {
+		for _, rawDecl := range astFile.Decls {
+			switch decl := rawDecl.(type) {
+			case *ast.FuncDecl:
+				if decl.Name.Name == *goFunction || *goFunction == "" {
+					testDecls = append(testDecls, decl)
+				}
 			}
 		}
 	}
+	if len(testDecls) == 0 {
+		panic(fmt.Sprintf("test function '%s' not found", *goFunction))
+	}
 
-	for _, lambda := range lambdas {
+	for _, decl := range testDecls {
+		bindings := makeBindings()
+		testVar := front.BindIdent(bindings.bindings, decl.Name, frontEnd.TypesInfo)
+		testVar.Flags["global"] = true
+		env := front.MakeEnv(frontEnd.TypesInfo, bindings)
+		lambda := front.ConvertFuncDecl(decl, env)
+		front.SimplifyTopLevel(lambda)
+		cps.AllocateRegisters(lambda)
 		runTests(lambda.Name, lambda)
 	}
+}
+
+type bindingsT struct {
+	bindings front.BindingsT
+}
+
+func makeBindings() *bindingsT {
+	return &bindingsT{front.BindingsT{}}
+}
+
+func (bindings *bindingsT) LookupVar(obj types.Object) *cps.VariableT {
+	return bindings.bindings[obj]
 }
 
 //----------------------------------------------------------------

@@ -196,10 +196,10 @@ func (primop *PointerSetPrimopT) Name() string             { return "PointerSet"
 func (primop *PointerSetPrimopT) SideEffects() bool        { return true }
 func (primop *PointerSetPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
 func (primop *PointerSetPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
-	panic("Generating code for " + primop.Name())
+	return nil, nil
 }
 func (primop *PointerSetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {
-	return nil, env
+	return call.Next[0], env
 }
 
 type LetrecPrimopT struct{}

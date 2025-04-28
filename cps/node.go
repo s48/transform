@@ -250,6 +250,10 @@ type VariableT struct {
 	varRegAllocT // register allocation stuff
 }
 
+func (vart *VariableT) String() string {
+	return fmt.Sprintf("%s_%d", vart.Name, vart.Id)
+}
+
 func (vart *VariableT) IsUsed() bool {
 	return vart != nil && 0 < len(vart.Refs)
 }

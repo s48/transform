@@ -69,7 +69,7 @@ type PackageT struct {
 func (frontEnd *FrontEndT) LoadPackage(sourceDir string) {
 	buildPkg, err := build.ImportDir(sourceDir, 0)
 	if err != nil {
-		panic(fmt.Sprintf("No package found in directory '%s'", sourceDir))
+		panic(fmt.Sprintf("Error importing from directory '%s': %s", sourceDir, err))
 	}
 	if frontEnd.FindPackage(buildPkg.Name, buildPkg.Dir) != nil {
 		return

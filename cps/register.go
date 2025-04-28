@@ -466,9 +466,12 @@ func AllocateRegisters(top *CallNodeT) {
 	regLiveRanges := map[RegisterT]*liveRangeT{}
 	for !regAllocQueue.Empty() {
 		regAlloc := regAllocQueue.Dequeue()
-		okay := false
 		mask := regAlloc.allowedRegsMask
-		for i := startBit(mask); mask != 0; i = nextBit(mask, i) {
+		if mask == 0 {
+			panic("no allowed registers")
+		}
+		i := startBit(mask)
+		for {
 			reg := regAlloc.Class.Registers[i]
 			regLiveRange := regLiveRanges[reg]
 			if regLiveRange == nil || !regLiveRange.conflicts(&regAlloc.liveRange) {
@@ -477,12 +480,15 @@ func AllocateRegisters(top *CallNodeT) {
 				}
 				regAlloc.Register = reg
 				regLiveRanges[reg] = regLiveRange.union(&regAlloc.liveRange)
-				okay = true
 				break
 			}
 			mask ^= 1 << i
+			if mask == 0 {
+				break
+			}
+			i = nextBit(mask, i)
 		}
-		if !okay {
+		if mask == 0 {
 			// splitting will go here
 			panic("failed to allocate register")
 		}
