@@ -46,7 +46,7 @@ func main() {
 	for _, decl := range testDecls {
 		bindings := makeBindings()
 		testVar := front.BindIdent(bindings.bindings, decl.Name, frontEnd.TypesInfo)
-		testVar.Flags["global"] = true
+		testVar.Flags["package"] = true
 		env := front.MakeEnv(frontEnd.TypesInfo, bindings)
 		lambda := front.ConvertFuncDecl(decl, env)
 		front.SimplifyTopLevel(lambda)

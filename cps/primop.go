@@ -292,7 +292,7 @@ func (primop *LoadRegPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, E
 type MakeLiteralPrimopT struct{}
 
 func (primop *MakeLiteralPrimopT) Name() string             { return "makeLiteral" }
-func (primop *MakeLiteralPrimopT) SideEffects() bool        { return false }
+func (primop *MakeLiteralPrimopT) SideEffects() bool        { return true }
 func (primop *MakeLiteralPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
 func (primop *MakeLiteralPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	return registerUsage(call)

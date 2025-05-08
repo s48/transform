@@ -493,25 +493,24 @@ func CheckNode(topCall *CallNodeT) {
 					panic(fmt.Sprintf("bad parent pointer %+v %+v", next))
 				}
 				check(next, node)
-				for _, output := range node.Outputs {
-					if output.Binder != node {
-						fmt.Printf("%s_%d has bad binder %+v\n",
-							output.Name, output.Id, output.Binder)
-					}
-					if len(output.Refs) != refs[output] {
-						panic(fmt.Sprintf("%s_%d has %d refs but %d reference nodes",
-							output.Name, output.Id, len(output.Refs), refs[output]))
-					}
-					delete(refs, output)
-				}
 			}
-
+			for _, output := range node.Outputs {
+				if output.Binder != node {
+					fmt.Printf("%s_%d has bad binder %+v\n",
+						output.Name, output.Id, output.Binder)
+				}
+				if len(output.Refs) != refs[output] {
+					panic(fmt.Sprintf("%s_%d has %d refs but %d reference nodes",
+						output.Name, output.Id, len(output.Refs), refs[output]))
+				}
+				delete(refs, output)
+			}
 		case *LiteralNodeT:
 			// nothing to do
 		case *ReferenceNodeT:
 			vart := node.Variable
 			// Global variables don't have binders.
-			if vart.HasFlag("global") {
+			if vart.HasFlag("package") {
 				break
 			}
 			if vart.Binder == nil {

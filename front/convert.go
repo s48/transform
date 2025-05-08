@@ -96,7 +96,10 @@ func (env *envT) addMakeCell(vart *VariableT) {
 }
 
 func (env *envT) lookupVar(ident *ast.Ident) *VariableT {
-	obj := env.typeInfo.ObjectOf(ident)
+	return env.lookupObj(env.typeInfo.ObjectOf(ident))
+}
+
+func (env *envT) lookupObj(obj types.Object) *VariableT {
 	if obj == nil {
 		return nil
 	}
@@ -586,34 +589,24 @@ func cpsArguments(args []ast.Expr, env *envT, calls *CallsT) []NodeT {
 	return values
 }
 
-func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
+func cleanExpr(astNode ast.Expr, env *envT) ast.Expr {
 	astNode = ast.Unparen(astNode) // remove any parens
 	switch x := astNode.(type) {
+	case *ast.IndexExpr:
+		// If this is a generic being applied to a type we ignore the
+		// index.  The type checker has already taken it into account.
+		if env.typeInfo.Types[x.Index].IsType() {
+			return cleanExpr(x.X, env)
+		}
+	}
+	return astNode
+}
+
+func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
+	astNode = cleanExpr(astNode, env) // remove any parens or type parameters
+	switch x := astNode.(type) {
 	case *ast.Ident:
-		typeAndValue := env.typeInfo.Types[x]
-		if typeAndValue.IsValue() && typeAndValue.Value != nil {
-			return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
-		}
-		vart := env.lookupVar(x)
-		if vart == nil {
-			// It's an import.  For now we assume it's a primop.
-			// Uses[x] is non-nil for source packages (e.g. vpu) and
-			// nil for 'len'.  Defs[x] is also nil for 'len'.  The
-			// 'builtin' package has documentation for all of Go's
-			// builtin names, but I can't find a programatic list
-			// anywhere.
-			primop := LookupPrimop(x.Name)
-			if primop == nil {
-				panic(fmt.Sprintf("unbound variable %s", x.Name))
-			}
-			vart = MakeVariable(x.Name, typeAndValue.Type, x.Pos())
-			vart.Flags["global"] = true
-			vart.Flags["primop"] = primop
-		}
-		if vart.HasFlag("cell") {
-			vart = calls.BuildCall("cellRef", vart.Name, vart.Type, vart)
-		}
-		return []NodeT{MakeReferenceNode(vart)}
+		return []NodeT{cpsIdent(x, false, env, calls)}
 	case *ast.BasicLit:
 		if x.Kind == token.INT {
 			n, success := new(big.Int).SetString(x.Value, 0)
@@ -649,13 +642,7 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 			return makeExprCall(x.Op.String(), x.OpPos, x, env, calls, inputs...)
 		}
 	case *ast.IndexExpr:
-		// If this is a generic being applied to a type we ignore the
-		// index.  The type checker has already taken it into account.
-		if env.typeInfo.Types[x.Index].IsType() {
-			return cpsExpr(x.X, env, calls)
-		} else {
-			return []NodeT{cpsLhs(x, false, env, calls).read(calls)}
-		}
+		return []NodeT{cpsLhs(x, false, env, calls).read(calls)}
 	case *ast.CallExpr:
 		return cpsCallExpr(x, env, calls)
 	case *ast.ArrayType:
@@ -682,25 +669,54 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 	case *ast.FuncLit: // .Type *FuncType   .Body *BlockStmt
 		return []NodeT{CpsFunc("@", x.Type, x.Body, env.typeInfo.Types[x].Type, env)}
 	case *ast.SelectorExpr:
-		switch base := x.X.(type) {
-		case *ast.Ident:
-			typeAndValue := env.typeInfo.Types[x]
-			if typeAndValue.IsValue() && typeAndValue.Value != nil {
-				return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
-			}
-			switch object := env.typeInfo.Uses[base].(type) {
-			case *types.PkgName:
-				return []NodeT{MakeReferenceNode(env.lookupVar(x.Sel))}
-			default:
-				panic(fmt.Sprintf("unhandled type of selector Ident: '%+v'", object))
-			}
-		default:
-			panic(fmt.Sprintf("unhandled type of selector base: '%+v'", base))
+		// 'const' from another package
+		typeAndValue := env.typeInfo.Types[x]
+		if typeAndValue.IsValue() && typeAndValue.Value != nil {
+			return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
 		}
+		// method call
+		selection := env.typeInfo.Selections[x]
+		if selection != nil {
+			panic(fmt.Sprintf("have selection %s\n", selection))
+		}
+		panic("unhandled selector expression")
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
 	}
 	return nil
+}
+
+func cpsIdent(ident *ast.Ident, isCalled bool, env *envT, calls *CallsT) NodeT {
+	typeAndValue := env.typeInfo.Types[ident]
+	if typeAndValue.IsValue() && typeAndValue.Value != nil {
+		return &LiteralNodeT{Value: typeAndValue.Value}
+	}
+	vart := env.lookupVar(ident)
+	if vart == nil {
+		// It's a Go built-in like 'len', 'make', or 'uint64' (in a
+		// cast). We assume it's implemented by a primop.  Uses[ident]
+		// is non-nil for source packages (e.g. vpu) and nil for
+		// 'len'.  Defs[ident] is also nil for 'len'.  The 'builtin'
+		// package has documentation for all of Go's builtin names,
+		// but I can't find a programatic list anywhere.
+		primop := LookupPrimop(ident.Name)
+		if primop == nil {
+			panic(fmt.Sprintf("unbound variable %s", ident.Name))
+		}
+		vart = MakeVariable(ident.Name, typeAndValue.Type, ident.Pos())
+		vart.Flags["package"] = true
+		vart.Flags["primop"] = primop
+	}
+	if vart.HasFlag("package") {
+		// 'var' variables always get "packageRef", 'func' ones do
+		// if not being called.
+		if vart.HasFlag("var") || !isCalled {
+			vart = calls.BuildCall("packageRef", vart.Name, vart.Type, vart)
+		}
+	} else if vart.HasFlag("cell") {
+		vart = calls.BuildCall("cellRef", vart.Name, vart.Type, vart)
+	}
+	return MakeReferenceNode(vart)
 }
 
 // && and || require conditionals because the second argument is
@@ -732,8 +748,11 @@ func cpsAndOrExpr(binaryExpr *ast.BinaryExpr, env *envT, calls *CallsT) []NodeT 
 }
 
 func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
-	values := cpsArguments(callExpr.Args, env, calls)
-	fun := cpsExpr(callExpr.Fun, env, calls)
+	args := cpsArguments(callExpr.Args, env, calls)
+	fun, object := cpsCalledExpr(callExpr.Fun, env, calls)
+	if object != nil {
+		args = append([]NodeT{object}, args...)
+	}
 	var resultTypes []types.Type
 	switch resultType := env.typeInfo.Types[callExpr].Type.(type) {
 	case *types.Tuple:
@@ -749,15 +768,45 @@ func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 		resultVars[i] = MakeVariable("v", typ)
 		results[i] = MakeReferenceNode(resultVars[i])
 	}
-	funVar := fun[0].(*ReferenceNodeT).Variable
+	funVar := fun.(*ReferenceNodeT).Variable
 	primop := funVar.Flags["primop"]
 	if primop == nil {
-		values = append(fun, values...)
+		args = append([]NodeT{fun}, args...)
 		primop = LookupPrimop("procCall")
 	}
-	calls.AddCall(primop.(PrimopT), resultVars, values)
+	calls.AddCall(primop.(PrimopT), resultVars, args)
 	calls.SetLastSource(callExpr.Lparen)
 	return results
+}
+
+func cpsCalledExpr(expr ast.Expr, env *envT, calls *CallsT) (NodeT, NodeT) {
+	expr = cleanExpr(expr, env) // remove any parens or type parameters
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return cpsIdent(x, true, env, calls), nil
+	case *ast.SelectorExpr:
+		// method call
+		selection := env.typeInfo.Selections[x]
+		if selection != nil {
+			panic(fmt.Sprintf("have selection %s\n", selection))
+		}
+		switch base := x.X.(type) {
+		case *ast.Ident:
+			switch env.typeInfo.Uses[base].(type) {
+			// non-const import from another package
+			case *types.PkgName:
+				return MakeReferenceNode(env.lookupVar(x.Sel)), nil
+			default:
+				// Method dispatch.
+				vart := env.lookupObj(env.typeInfo.ObjectOf(x.Sel).(*types.Func).Origin())
+				if vart == nil {
+					panic(fmt.Sprintf("no binding for method %s.%s", base.Name, x.Sel.Name))
+				}
+				return MakeReferenceNode(vart), cpsExpr(x.X, env, calls)[0]
+			}
+		}
+	}
+	return cpsExpr(expr, env, calls)[0], nil
 }
 
 // Create a call to the primop and return a reference node bount to

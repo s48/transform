@@ -361,7 +361,7 @@ func CalledLambda(call *CallNodeT) *CallNodeT {
 				}
 			}
 		default:
-			panic("unknown called-variable binding call")
+			panic("unknown called-variable binding call " + CallString(binder))
 		}
 	default:
 		panic("unknown called node type")
