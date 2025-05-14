@@ -197,6 +197,7 @@ func (frontEnd *FrontEndT) readFiles(pkgs []*PackageT) {
 func (frontEnd *FrontEndT) ParseFile(filename string, contents []byte) *ast.File {
 	// As recommended in the docs, we skip the old, pre-Generic type checking.
 	parseOpts := parser.SkipObjectResolution | parser.ParseComments
+	TheFileSet = frontEnd.FileSet
 	astFile, err := parser.ParseFile(frontEnd.FileSet, filename, contents, parseOpts)
 	if err != nil {
 		panic(err)

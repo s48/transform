@@ -331,6 +331,7 @@ func (block *regBlockT) getEnd() *CallNodeT {
 }
 
 func AllocateRegisters(top *CallNodeT) {
+	random = rand.New(rand.NewSource(0))
 	makeVarsForLiterals()
 	procs := []*CallNodeT{}
 	top.SetFlag(1)
@@ -508,8 +509,10 @@ func AllocateRegisters(top *CallNodeT) {
 	}
 }
 
+var random = rand.New(rand.NewSource(0))
+
 func startBit(mask uint64) int {
-	index := rand.Intn(bits.OnesCount64(mask))
+	index := random.Intn(bits.OnesCount64(mask))
 	bit := 0
 	for {
 		if mask&1 == 1 {

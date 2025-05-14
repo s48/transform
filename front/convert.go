@@ -180,11 +180,13 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 						calls.BuildNoOutputCall("cellSet", cellVar, value)
 					}
 				}
+			case token.CONST:
+				// Do nothing: we assume that the Go front end has taken care of it.
 			default:
-				panic("unrecognized declaration")
+				panic(fmt.Sprintf("unrecognized declaration at %s", source(decl.TokPos)))
 			}
 		default:
-			panic("unrecognized declaration")
+			panic(fmt.Sprintf("unrecognized declaration at %s", source(decl.Pos())))
 		}
 	case *ast.AssignStmt:
 		switch x.Tok {
