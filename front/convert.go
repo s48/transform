@@ -674,14 +674,14 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		// 'const' from another package
 		typeAndValue := env.typeInfo.Types[x]
 		if typeAndValue.IsValue() && typeAndValue.Value != nil {
-			return []NodeT{&LiteralNodeT{Value: typeAndValue.Value}}
+			return []NodeT{MakeLiteral(typeAndValue.Value, typeAndValue.Type)}
 		}
 		// method call
 		selection := env.typeInfo.Selections[x]
 		if selection != nil {
 			panic(fmt.Sprintf("have selection %s\n", selection))
 		}
-		panic("unhandled selector expression")
+		panic(fmt.Sprintf("unhandled selector expression %s", source(x.Pos())))
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
 	}
@@ -691,7 +691,7 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 func cpsIdent(ident *ast.Ident, isCalled bool, env *envT, calls *CallsT) NodeT {
 	typeAndValue := env.typeInfo.Types[ident]
 	if typeAndValue.IsValue() && typeAndValue.Value != nil {
-		return &LiteralNodeT{Value: typeAndValue.Value}
+		return MakeLiteral(typeAndValue.Value, typeAndValue.Type)
 	}
 	vart := env.lookupVar(ident)
 	if vart == nil {

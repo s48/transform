@@ -112,12 +112,37 @@ func (node *LiteralNodeT) String() string {
 	return node.Value.ExactString()
 }
 
+// The front end gets constant.Value objects for constants so for those
+// we have to use `value` as is.  In all other cases we make a new
+// constant.Value.
+
 func MakeLiteral(value any, typ types.Type) *LiteralNodeT {
-	return &LiteralNodeT{Value: constant.Make(value), Type: typ}
+	if typ == nil {
+		panic("MakeLiteral got nil type\n")
+	}
+	var v constant.Value
+	switch constantValue := value.(type) {
+	case constant.Value:
+		v = constantValue
+	default:
+		v = constant.Make(value)
+	}
+	// A nil value means that this a literal Go type, such as the type
+	// argument to 'make'.  Non-nil values must have a recognized type
+	// (there doesn't seem to be a way to recover an 'unknown' value
+	// from a constant.Value).
+	if value != nil && v.ExactString() == "unknown" {
+		panic(fmt.Sprintf("MakeLiteral got unknown value with type '%s' '%T'", typ, value))
+	}
+	if typ == nil {
+		panic(fmt.Sprintf("MakeLiteral got nil type '%T'", value))
+	}
+	return &LiteralNodeT{Value: v, Type: typ}
 }
 
 func CopyLiteralNode(node *LiteralNodeT) *LiteralNodeT {
-	return &LiteralNodeT{Value: node.Value,
+	return &LiteralNodeT{
+		Value:     node.Value,
 		Type:      node.Type,
 		NodeBaseT: NodeBaseT{source: node.source}}
 }
@@ -506,7 +531,9 @@ func CheckNode(topCall *CallNodeT) {
 				delete(refs, output)
 			}
 		case *LiteralNodeT:
-			// nothing to do
+			if node.Type == nil {
+				panic(fmt.Sprintf("CheckNode: literal has nil type: '%s'\n", node.Value.ExactString()))
+			}
 		case *ReferenceNodeT:
 			vart := node.Variable
 			// Global variables don't have binders.

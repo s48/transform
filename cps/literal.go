@@ -18,7 +18,7 @@ func makeVarsForLiterals() {
 	}
 }
 
-// Do we need to worry about register types?
+// Do we need to worry about register types?  Yes.
 
 func varsForLiterals(call *CallNodeT, vars map[string]*VariableT) {
 	inputs, _ := call.Primop.RegisterUsage(call)
@@ -33,7 +33,11 @@ func varsForLiterals(call *CallNodeT, vars map[string]*VariableT) {
 				continue
 			}
 			literal := input.(*LiteralNodeT)
-			value := literal.Value.ExactString()
+			typeString := ""
+			if literal.Type != nil {
+				typeString = literal.Type.String()
+			}
+			value := literal.Value.ExactString() + "$" + typeString
 			vart := vars[value]
 			if vart != nil {
 				ReplaceInput(input, MakeReferenceNode(vart))

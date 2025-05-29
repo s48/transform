@@ -220,7 +220,7 @@ func RemoveUnusedInputs(top *CallNodeT) {
 		change := true
 		for change {
 			change = false
-			for lambda, _ := range Lambdas {
+			for lambda := range Lambdas {
 				if lambda.CallType == JumpLambda &&
 					removeUnusedJumpInputs(lambda) {
 					change = true
@@ -404,7 +404,7 @@ func InlineProcedure(call *CallNodeT, proc *CallNodeT) {
 		ReplaceInput(call.Inputs[0], proc)
 	}
 	call.Primop = LookupPrimop("let")
-	MarkChanged(call)
+	MarkChanged(proc)
 }
 
 func setOutputs(call *CallNodeT, outputs []*VariableT) {

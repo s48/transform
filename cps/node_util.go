@@ -219,9 +219,9 @@ func Nodeify(rawSpec any) NodeT {
 	case *VariableT:
 		return MakeReferenceNode(spec)
 	case int:
-		return &LiteralNodeT{Value: constant.MakeInt64(int64(spec))}
+		return MakeLiteral(constant.MakeInt64(int64(spec)), types.Typ[types.Int])
 	case bool:
-		return &LiteralNodeT{Value: constant.MakeBool(spec)}
+		return MakeLiteral(constant.MakeBool(spec), types.Typ[types.Bool])
 	default:
 		panic(fmt.Sprintf("can't coerce to a node: %v", spec))
 		return nil
