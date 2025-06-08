@@ -33,25 +33,64 @@ import (
 	"github.com/s48/transform/util"
 )
 
-// Jumps can only be within a strongly-connected component or to
-// another component further down the list.  There are no jumps
-// to earlier components.
-
 func AddStackFrames(proc *CallNodeT, frameType types.Type) {
 	blocks := FindBasicBlocks[*frameBlockT](proc, makeFrameBlock)
-	components := util.StronglyConnectedComponents(
-		blocks,
-		func(block *frameBlockT) []*frameBlockT { return block.next })
+	findDominators(blocks[0],
+		func(b *frameBlockT) []*frameBlockT { return b.next },
+		func(b *frameBlockT, d *frameBlockT) {
+			b.dominator = d
+			Push(&d.dominatees, b)
+		})
+
+	// Find loop headers by looking for edges whose tail dominates
+	// their head.  All blocks on paths upwards from the tail to the
+	// head are in the loop.
+	loopHeaders := []*frameBlockT{}
 	for _, block := range blocks {
-		node := block.start.Parent()
-		for ; node != nil; node = node.Parent() {
-			if node.Block != nil {
-				parent := node.Block.(*frameBlockT)
-				block.parent = parent
-				break
+		for _, n := range block.next {
+			for dom := block.dominator; dom != blocks[0]; dom = dom.dominator {
+				if n == dom {
+					if len(n.backEdges) == 0 {
+						Push(&loopHeaders, n)
+					}
+					Push(&n.backEdges, block)
+					findLoopBlocks(n, block)
+					break
+				}
 			}
 		}
 	}
+
+	//	for _, block := range blocks[1:] {
+	//		block.loopHeader = blocks[0]
+	//	}
+
+	// Sort loops from biggest to smallest.
+	slices.SortFunc(loopHeaders,
+		func(x, y *frameBlockT) int {
+			return len(y.loopBlocks) - len(x.loopBlocks)
+		})
+
+	// The sorting means that outer loops are processed before inner
+	// loops, so that each loop ends up with its proper depth and
+	// immediate parent.
+	for _, header := range loopHeaders {
+		header.loopDepth += 1
+		header.loopParent = header.loopHeader
+		header.loopHeader = header
+		for child := range header.loopBlocks {
+			child.loopHeader = header
+			child.loopDepth = header.loopDepth
+		}
+	}
+
+	//	for _, loop := range loopHeaders {
+	//		fmt.Printf("loop: %s %d (%s)", loop, loop.loopDepth, loop.loopParent)
+	//		for block := range loop.loopBlocks {
+	//			fmt.Printf(" %s", block)
+	//		}
+	//		fmt.Printf("\n")
+	//	}
 
 	contVar := proc.Outputs[0]
 	frameVar := MakeVariable("frame", frameType)
@@ -61,27 +100,20 @@ func AddStackFrames(proc *CallNodeT, frameType types.Type) {
 	makeCellCall := proc.Next[0]
 	procFrameVar := addFramePush(proc, frameVar)
 	insertCall(proc.Next[0], "makeCell", procFrameVar)
-	addStackFrameRefs(blocks[0], procFrameVar, procFrameVar)
+	blocks[0].frameVar = procFrameVar
 
-	for i, component := range components {
-		for _, block := range component {
-			block.component = i
+	// Add a cell for each loop's saved frame pointer.
+	for _, header := range loopHeaders {
+		outerFrameVar := procFrameVar
+		if header.loopParent != nil {
+			outerFrameVar = header.loopParent.frameVar
 		}
+		header.frameVar = addFramePush(header.start, outerFrameVar)
+		insertCall(makeCellCall, "makeCell", header.frameVar)
 	}
 
-	for _, component := range components[1:] {
-		if len(component) == 1 {
-			block := component[0]
-			addStackFrameRefs(block, block.parent.frameVar, procFrameVar)
-		} else {
-			frameVar := addLoopStackFrame(component)
-			if frameVar != nil {
-				insertCall(makeCellCall, "makeCell", frameVar)
-				for _, block := range component {
-					addStackFrameRefs(block, frameVar, procFrameVar)
-				}
-			}
-		}
+	for _, block := range blocks {
+		addStackFrameRefs(block, procFrameVar)
 	}
 
 	for _, block := range blocks {
@@ -93,41 +125,17 @@ func AddStackFrames(proc *CallNodeT, frameType types.Type) {
 	// fmt.Printf("====== end frames ======\n")
 }
 
-// We're looking to see if the loop has a single entry point.  If so,
-// we can add a frame stack push there and pop it off on all back
-// edges.
-// If not, then we have an irreducible loop and it won't get its own
-// frame.  Fortunately those are rare and require gotos to create.
+// Walk up the 'previous' links from 'block' until you hit 'header',
+// adding everything to 'header's loopBlocks.
 
-func addLoopStackFrame(blocks []*frameBlockT) *VariableT {
-	var head *frameBlockT
-	for _, block := range blocks {
-		for _, prev := range block.previous {
-			if prev.component < block.component {
-				if head == nil {
-					head = block
-				} else {
-					fmt.Printf("frame lost %s_%d %s_%d",
-						head.start.Name, head.start.Id,
-						block.start.Name, block.start.Id)
-					printFrameBlocks(blocks, head)
-					return nil
-				}
-			}
-		}
+func findLoopBlocks(header *frameBlockT, block *frameBlockT) {
+	if block == header || header.loopBlocks.Contains(block) {
+		return
 	}
-	if head == nil {
-		panic("stack frames: loop has no head")
+	header.loopBlocks.Add(block)
+	for _, prev := range block.previous {
+		findLoopBlocks(header, prev)
 	}
-	head.isHead = true
-	frameVar := addFramePush(head.start, head.parent.frameVar)
-	for _, block := range blocks {
-		block.frameVar = frameVar
-	}
-
-	// fmt.Printf("frame %s_%d", head.start.Name, head.start.Id)
-	// printFrameBlocks(blocks, head)
-	return frameVar
 }
 
 type frameBlockT struct {
@@ -136,14 +144,20 @@ type frameBlockT struct {
 	next     []*frameBlockT
 	previous []*frameBlockT
 
-	parent    *frameBlockT // lexical parent
-	component int
-	isHead    bool
-	frameVar  *VariableT
+	dominator  *frameBlockT
+	dominatees []*frameBlockT
+	loopHeader *frameBlockT // nil if not in a loop
+	loopDepth  int
+
+	// Only loop headers have these.
+	backEdges  []*frameBlockT
+	loopBlocks util.SetT[*frameBlockT] // all blocks in the loop
+	loopParent *frameBlockT            // outer loop, if any
+	frameVar   *VariableT
 }
 
 func makeFrameBlock() *frameBlockT {
-	return &frameBlockT{}
+	return &frameBlockT{loopBlocks: util.NewSet[*frameBlockT]()}
 }
 
 func (block *frameBlockT) initialize(start *CallNodeT, end *CallNodeT) {
@@ -153,21 +167,16 @@ func (block *frameBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 
 func (block *frameBlockT) addNext(rawNext BasicBlockT) {
 	next := rawNext.(*frameBlockT)
-	block.next = append(block.next, next)
-	next.previous = append(next.previous, block)
+	Push(&block.next, next)
+	Push(&next.previous, block)
 }
 
 func (block *frameBlockT) getEnd() *CallNodeT {
 	return block.end
 }
 
-func printFrameBlocks(blocks []*frameBlockT, skip *frameBlockT) {
-	for _, block := range blocks {
-		if block != skip {
-			fmt.Printf(" %s_%d", block.start.Name, block.start.Id)
-		}
-	}
-	fmt.Printf("\n")
+func (block *frameBlockT) String() string {
+	return fmt.Sprintf("%s_%d", block.start.Name, block.start.Id)
 }
 
 // How primops tell us that they do stack allocation.
@@ -184,8 +193,13 @@ func IsStackAllocator(primop PrimopT) bool {
 	}
 }
 
-func addStackFrameRefs(block *frameBlockT, frameVar *VariableT, procFrameVar *VariableT) {
-	block.frameVar = frameVar
+func addStackFrameRefs(block *frameBlockT, procFrameVar *VariableT) {
+	var frameVar *VariableT
+	if block.loopHeader == nil {
+		frameVar = procFrameVar
+	} else {
+		frameVar = block.loopHeader.frameVar
+	}
 	for call := block.start; call != block.end; call = call.Next[0] {
 		for _, node := range call.Inputs {
 			if IsProcLambdaNode(node) {
@@ -196,22 +210,24 @@ func addStackFrameRefs(block *frameBlockT, frameVar *VariableT, procFrameVar *Va
 			addFrameInput(call, frameVar)
 		}
 	}
-	if len(block.end.Next) == 0 {
-		call := block.end
-		switch call.Primop.Name() {
-		case "jump":
-			target := CalledLambda(call).Block.(*frameBlockT)
-			//			fmt.Printf("jump block %s_%d(%d) %s target %s_%d(%d) %s\n",
-			//				block.start.Name, block.start.Id, block.component, block.frameVar,
-			//				target.start.Name, target.start.Id, target.component, target.frameVar)
-			if target.component < block.component ||
-				target.component == block.component && target.isHead {
-				addFramePop(call, jumpFrameVar(block, target))
+	if len(block.end.Next) == 2 {
+		for _, next := range block.next {
+			if next.loopHeader != block.loopHeader {
+				addFramePop(next.start, frameVar)
 			}
+		}
+	} else if len(block.end.Next) == 0 {
+		end := block.end
+		switch end.Primop.Name() {
 		case "return":
-			addFramePop(call, procFrameVar)
+			addFramePop(end, procFrameVar)
+		case "jump":
+			target := block.next[0]
+			if target.loopDepth < block.loopDepth || target == block.loopHeader {
+				addFramePop(end, jumpFrameVar(block, target))
+			}
 		default:
-			panic("unexpected no-next call " + call.String())
+			panic("unexpected no-next call " + end.String())
 		}
 	}
 }
@@ -232,12 +248,13 @@ func addFramePush(call *CallNodeT, outerFrameVar *VariableT) *VariableT {
 	return cellFrameVar
 }
 
-// This needs to figure out when you're jumping out of two or frames
-// at the same time.  First I need a test that does that.
-
 func jumpFrameVar(from *frameBlockT, to *frameBlockT) *VariableT {
-	// fmt.Printf("jump from %s to %s\n", from.frameVar, to.frameVar)
-	return from.frameVar
+	// fmt.Printf("jump from %s(%d) to %s(%d)\n", from, from.loopDepth, to, to.loopDepth)
+	delta := from.loopDepth - to.loopDepth
+	for ; 0 < delta; delta-- {
+		from = from.loopHeader.loopParent
+	}
+	return from.loopHeader.frameVar
 }
 
 func addFramePop(call *CallNodeT, frameVar *VariableT) {
@@ -248,7 +265,7 @@ func addFramePop(call *CallNodeT, frameVar *VariableT) {
 	MarkChanged(parent)
 }
 
-// 'procCall' gets the frame variable right after the procedures, to
+// 'procCall' gets the frame variable right after the procedure, to
 // line up with the procedure's frame argument.  For everything else
 // it is put at the end.
 
