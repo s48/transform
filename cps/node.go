@@ -485,6 +485,9 @@ func CheckNode(topCall *CallNodeT) {
 				PpCps(parent)
 				panic(fmt.Sprintf("bad parent pointer %+v", node))
 			}
+			if node.Block != nil {
+				panic(fmt.Sprintf("non-nil block %+v", node))
+			}
 			if node.Primop.Name() == "letrec" {
 				for _, output := range node.Outputs {
 					refs[output] = 0

@@ -7,13 +7,17 @@ package cps
 
 import (
 	"fmt"
+	"slices"
 )
 
 // Add explicit calls to assign literals to variables for those
 // primops that need their inputs in registers.
 
 func makeVarsForLiterals() {
-	for lambda := range Lambdas {
+	lambdas := Lambdas.Members()
+	// Sort to get deterministic behavior.
+	slices.SortFunc(lambdas, func(x, y *CallNodeT) int { return x.Id - y.Id })
+	for _, lambda := range lambdas {
 		varsForLiterals(lambda, map[string]*VariableT{})
 	}
 }

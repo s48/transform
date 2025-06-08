@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 )
 
@@ -228,7 +229,8 @@ func callExtra(call *CallNodeT) string {
 	if call.source != 0 && TheFileSet != nil {
 		position := TheFileSet.Position(call.source)
 		if position.IsValid() {
-			result += fmt.Sprintf(" %d:%d", position.Line, position.Column)
+			filename := path.Base(position.Filename)
+			result += fmt.Sprintf(" %s:%d:%d", filename, position.Line, position.Column)
 		}
 	}
 	return result

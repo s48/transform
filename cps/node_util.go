@@ -222,6 +222,17 @@ func Nodeify(rawSpec any) NodeT {
 		return MakeLiteral(constant.MakeInt64(int64(spec)), types.Typ[types.Int])
 	case bool:
 		return MakeLiteral(constant.MakeBool(spec), types.Typ[types.Bool])
+	case constant.Value:
+		var typ types.Type
+		switch spec.Kind() {
+		case constant.Int:
+			typ = types.Typ[types.Int]
+		case constant.Bool:
+			typ = types.Typ[types.Bool]
+		default:
+			panic("unknown type of constant: " + spec.ExactString())
+		}
+		return MakeLiteral(spec, typ)
 	default:
 		panic(fmt.Sprintf("can't coerce to a node: %v", spec))
 		return nil

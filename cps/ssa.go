@@ -67,6 +67,9 @@ func SimplifyCells(top *CallNodeT) {
 	//    printBlockVars(block)
 	// }
 	simplifyBlockCells(blocks[0], nil)
+	for _, block := range blocks {
+		block.start.Block = nil
+	}
 }
 
 func findCellVars(block *cellBlockT, varSetBlocks map[*VariableT][]*cellBlockT) {
@@ -234,6 +237,8 @@ func simplifyBlockCells(block *cellBlockT, values *CellValuesT) {
 	}
 	if call.Primop.Name() == "jump" {
 		phiVars := block.next[0].phiVars // there can be only one next block
+		// Sort to get deterministic behavior.
+		slices.SortFunc(phiVars, func(x, y *VariableT) int { return x.Id - y.Id })
 		start := len(call.Inputs)
 		call.Inputs = append(call.Inputs, make([]NodeT, len(phiVars))...)
 		for i, phiVar := range phiVars {

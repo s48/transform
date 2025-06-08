@@ -187,11 +187,14 @@ func (bundle *bundleT) addUse(index int, spec *RegUseSpecT) {
 }
 
 func (bundle *bundleT) addInterval(start int, end int) {
+	if end < start {
+		panic("addInterval: end is before start")
+	}
 	vart := bundle.vars.Members()[0] // there is only one at this point
 	if end == 0 {
 		panic(fmt.Sprintf("%s_%d has an interval ending at zero", vart.Name, vart.Id))
 	}
-	// can's use liveRange.add because the intervals are in
+	// can't use liveRange.add because the intervals are in
 	// reverse order at this point
 	intervals := bundle.regAlloc.liveRange.intervals
 	if len(intervals) != 0 {
@@ -299,13 +302,30 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	call := start
 	count := 1
 	for {
-		for _, vart := range call.Outputs {
-			block.bound.Add(vart)
+		inputs, outputs := call.Primop.RegisterUsage(call)
+		if outputs != nil {
+			if len(outputs) != len(call.Outputs) {
+				panic(fmt.Sprintf("Primop %s returned %d output registers but has %d outputs.",
+					call.Primop.Name(), len(outputs), len(call.Outputs)))
+			}
+			for i, vart := range call.Outputs {
+				if outputs[i] != nil {
+					block.bound.Add(vart)
+				} else if 0 < len(vart.Refs) {
+					panic(fmt.Sprintf("output %d of %s has nil register spec\n", i, call))
+				}
+			}
 		}
-		for i := 0; i < len(call.Inputs); i++ {
-			vart := call.InputVariable(i)
-			if vart != nil {
-				block.live.Add(vart)
+		if inputs != nil {
+			if len(inputs) != len(call.Inputs) {
+				panic(fmt.Sprintf("Primop %s returned %d input registers but has %d inputs.",
+					call.Primop.Name(), len(inputs), len(call.Inputs)))
+			}
+			for i, input := range inputs {
+				vart := call.InputVariable(i)
+				if input != nil && vart != nil {
+					block.live.Add(vart)
+				}
 			}
 		}
 		if call == end {
@@ -589,36 +609,42 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 	for _, next := range block.next {
 		for vart, _ := range next.live {
 			ends[vart] = endIndex
-			allVars.Add(vart)
 		}
 	}
 	lateIndex := endIndex
-	for call := block.end; call != top.parent; call = call.parent {
+	for call := block.end; ; call = call.parent {
 		inputs, outputs := call.Primop.RegisterUsage(call)
+		/*
+			if outputs == nil {
+				for i, vart := range call.Outputs {
+					if vart != nil && 0 < len(vart.Refs) {
+						fmt.Printf("output %d of %s has no register spec\n", i, call)
+					}
+				}
+			}
+		*/
 		// fmt.Printf("call %d(%s) %d lateIndex %d\n",
 		//     call.Id, call.Primop.Name(), len(call.Outputs), lateIndex)
 		if outputs != nil {
-			if len(outputs) != len(call.Outputs) {
-				panic(fmt.Sprintf("Primop %s returned %d output registers but has %d outputs.",
-					call.Primop.Name(), len(outputs), len(call.Outputs)))
-			}
 			for i, vart := range call.Outputs {
 				if outputs[i] != nil {
-					index := lateIndex + outputs[i].PhaseOffset
-					// fmt.Printf("  %s_%d index %d\n", vart.Name, vart.Id, index)
-					vart.getBundle().addDefinition(index, outputs[i])
-					// +1 for inclusive -> exclusive
-					vart.getBundle().addInterval(index, ends[vart]+1)
+					end, found := ends[vart]
+					if found {
+						index := lateIndex + outputs[i].PhaseOffset
+						vart.getBundle().addDefinition(index, outputs[i])
+						allVars.Add(vart)
+						// +1 for inclusive -> exclusive
+						vart.getBundle().addInterval(index, end+1)
+					}
 				}
 			}
 		}
 		if inputs != nil {
-			if len(inputs) != len(call.Inputs) {
-				panic(fmt.Sprintf("Primop %s returned %d input registers but has %d inputs.",
-					call.Primop.Name(), len(inputs), len(call.Inputs)))
-			}
 			for i, input := range call.Inputs {
 				if inputs[i] == nil || input == nil {
+					if false && input.NodeType() == ReferenceNode {
+						fmt.Printf("input %d of %s has nil register spec\n", i, call)
+					}
 					continue
 				}
 				if IsReferenceNode(input) {
@@ -643,10 +669,18 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 			}
 		}
 		lateIndex -= 3
+		if call == block.start {
+			break
+		}
 	}
 	for _, vart := range block.live.Members() {
-		// +1 for inclusive -> exclusive
-		vart.getBundle().addInterval(startIndex, ends[vart]+1)
+		end, found := ends[vart]
+		if found {
+			// +1 for inclusive -> exclusive
+			vart.getBundle().addInterval(startIndex, end+1)
+		} else {
+			panic(fmt.Sprintf("live variable has no end point %s\n", vart))
+		}
 	}
 }
 

@@ -39,7 +39,7 @@ var outputSpec = &RegUseSpecT{Class: generalRegister, RegisterMask: allRegsMask}
 func init() {
 	for i := range numRegs {
 		generalRegister.Registers[i] = &registerT{generalRegister, "r" + strconv.Itoa(i)}
-		procOutputSpecs[i+1] = &RegUseSpecT{Class: generalRegister, RegisterMask: 1 << i}
+		procOutputSpecs[i] = &RegUseSpecT{Class: generalRegister, RegisterMask: 1 << i}
 	}
 }
 
