@@ -191,7 +191,11 @@ func printVariableName(variable *VariableT, writer *PpCpsWriterT) {
 }
 
 func printCallName(node *CallNodeT, writer *PpCpsWriterT) {
-	fmt.Fprintf(writer, "%s_%d", node.Name, node.Id)
+	if node == nil {
+		fmt.Fprintf(writer, "<nil>")
+	} else {
+		fmt.Fprintf(writer, "%s_%d", node.Name, node.Id)
+	}
 }
 
 func callName(node *CallNodeT) string {

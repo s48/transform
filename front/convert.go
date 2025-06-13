@@ -30,12 +30,13 @@ type envT struct {
 	// For adding 'makeCell' calls at the beginning.
 	currentBlock util.StackT[*CallsT]
 
-	// Variables bound to 'continue' and 'break' continuations.  There
-	// are stacks with the current values on top, for 'break' and
-	// 'continuation' statements without labels, and binding tables
-	// for those with labels.
-	continueVars util.StackT[*VariableT]
-	breakVars    util.StackT[*VariableT]
+	// Variables bound to 'continue', 'break', and 'fallthrough'
+	// continuations.  There are stacks with the current values on
+	// top, for 'break' and 'continuation' statements without labels,
+	// and binding tables for those with labels.
+	continueVars    util.StackT[*VariableT]
+	breakVars       util.StackT[*VariableT]
+	fallthroughVars util.StackT[*VariableT]
 	// These are not yet in use.
 	continueBindings BindingsT
 	breakBindings    BindingsT
@@ -236,6 +237,8 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 		cpsRangeLoop(x, env, calls)
 	case *ast.IfStmt:
 		cpsIfStatement(x, env, calls)
+	case *ast.SwitchStmt:
+		cpsSwitchStatement(x, env, calls)
 	case *ast.IncDecStmt:
 		lhs := cpsLhs(x.X, false, env, calls)
 		delta := big.NewInt(1)
@@ -266,7 +269,8 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 			jumpVar = env.breakVars.Top()
 		case token.CONTINUE:
 			jumpVar = env.continueVars.Top()
-			// case token.FALLTHROUGH:
+		case token.FALLTHROUGH:
+			jumpVar = env.fallthroughVars.Top()
 		}
 		if jumpVar == nil {
 			panic("unbound branch")
@@ -390,11 +394,131 @@ func cpsIfStatement(x *ast.IfStmt, env *envT, calls *CallsT) {
 
 	cond := cpsExpr(x.Cond, env, calls)[0]
 	if len(joinVar.Refs) == 0 {
-		makeIf(cond, trueCalls, falseCalls, nil, x.If, env, calls)
+		makeIf(cond, trueCalls, falseCalls, nil, x.If, calls)
 	} else {
 		joinLambda := MakeLambda("c", JumpLambda, nil)
 		calls.BuildVarCall("let", joinVar, joinLambda)
-		makeIf(cond, trueCalls, falseCalls, joinLambda, x.If, env, calls)
+		makeIf(cond, trueCalls, falseCalls, joinLambda, x.If, calls)
+	}
+}
+
+// SwitchStmt:
+//   Init   Stmt       // initialization statement; or nil
+//   Tag    Expr       // tag expression; or nil
+//   Body   *BlockStmt // CaseClauses only
+// If Tag is nil the case expressions have boolean values.
+//
+// CaseClause:
+//   List  []Expr    // list of expressions or types; nil means default case
+//   Body  []Stmt    // statement list; or nil
+//
+// A switch turns into a LETREC where the values are the CaseClause
+// Bodies as jump lambdas, plus one more that binds a 'break' variable
+// to the continuation to the switch statement.  Each CaseClause jump
+// lambda ends with a jump, either to the 'break' variable, or, if
+// there is a 'fallthrough', to the variable bound to the next
+// CaseClause's body.
+//
+// The body of the LETREC is a set of nested IF's that check the value
+// of the tag against the CaseClause Exprs, jumping to the proper
+// clause body when it finds a match.
+
+func cpsSwitchStatement(x *ast.SwitchStmt, env *envT, calls *CallsT) {
+	if x.Init != nil {
+		cpsStmt(x.Init, env, calls)
+	}
+	var tagNode NodeT
+	if x.Tag != nil {
+		tagNode = cpsExpr(x.Tag, env, calls)[0]
+	}
+	breakVar := MakeVariable("break", nil)
+	env.breakVars.Push(breakVar)
+
+	bodyVars := make([]*VariableT, len(x.Body.List))
+	var defaultVar *VariableT
+	for i, rawCase := range x.Body.List {
+		caseClause := rawCase.(*ast.CaseClause)
+		bodyVars[i] = MakeVariable("case", nil, caseClause.Case)
+		if caseClause.List == nil {
+			defaultVar = bodyVars[i]
+		}
+	}
+	if defaultVar == nil {
+		defaultVar = breakVar
+	}
+
+	bodyLambdas := make([]NodeT, len(x.Body.List))
+	for i, rawCase := range x.Body.List {
+		caseClause := rawCase.(*ast.CaseClause)
+		var fallthroughVar *VariableT
+		if i < len(bodyVars)-1 {
+			fallthroughVar = bodyVars[i+1]
+		}
+		bodyLambdas[i] =
+			cpsSwitchCaseBody(caseClause, fallthroughVar, breakVar, env)
+	}
+
+	breakLambda := MakeLambda("c", JumpLambda, nil)
+	env.breakVars.Pop()
+	calls.AddPrimopVarsCall(
+		"letrec",
+		append(bodyVars, breakVar),
+		append(bodyLambdas, breakLambda)...)
+	for i, rawCase := range x.Body.List {
+		caseClause := rawCase.(*ast.CaseClause)
+		cpsSwitchCaseCond(caseClause, tagNode, bodyVars[i], env, calls)
+	}
+	Erase(tagNode) // it was never used
+	calls.BuildFinalCall("jump", 0, defaultVar)
+	calls.SetLast(breakLambda)
+}
+
+// CaseClause:
+//   List  []Expr    // list of expressions or types; nil means default case
+//   Body  []Stmt    // statement list; or nil
+
+func cpsSwitchCaseBody(
+	caseClause *ast.CaseClause,
+	fallthroughVar *VariableT,
+	breakVar *VariableT,
+	env *envT) *CallNodeT {
+
+	calls := MakeCalls()
+	env.fallthroughVars.Push(fallthroughVar)
+	cpsBlock(caseClause.Body, env, calls)
+	env.fallthroughVars.Pop()
+	if !calls.HasFinal() {
+		calls.BuildFinalCall("jump", 0, breakVar)
+	}
+	body := MakeLambda("case", JumpLambda, nil)
+	AttachNext(body, calls.First)
+	return body
+}
+
+func cpsSwitchCaseCond(
+	caseClause *ast.CaseClause,
+	tagNode NodeT,
+	bodyVar *VariableT,
+	env *envT,
+	calls *CallsT) {
+
+	for _, expr := range caseClause.List {
+		value := cpsExpr(expr, env, calls)[0]
+		if tagNode != nil {
+			value = MakeReferenceNode(calls.BuildCall(
+				"==",
+				"v",
+				types.Typ[types.Bool],
+				CopyNodeTree(tagNode),
+				value))
+		}
+		trueCall := MakeCall(LookupPrimop("jump"), nil, MakeReferenceNode(bodyVar))
+		trueCall.Next = nil
+		call := MakeCall(LookupPrimop("if"), nil, value)
+		call.Next = []*CallNodeT{nil, nil}
+		AttachNext(call, trueCall)
+		fmt.Printf("cond %s\n", call)
+		calls.AppendCall(call)
 	}
 }
 
@@ -460,7 +584,7 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 	} else {
 		breakCalls := MakeCalls()
 		breakCalls.BuildFinalCall("jump", 0, breakVar)
-		makeIf(cond, bodyCalls, breakCalls, nil, position, env, condCalls)
+		makeIf(cond, bodyCalls, breakCalls, nil, position, condCalls)
 		AttachNext(topLambda, condCalls.First)
 	}
 }
@@ -541,18 +665,17 @@ func rangeStmtKeyType(rangeExp ast.Expr, env *envT) types.Type {
 	return types.Typ[types.UntypedInt]
 }
 
-func makeIf(cond NodeT,
-	trueCalls *CallsT, falseCalls *CallsT,
+func makeIf(
+	cond NodeT,
+	trueCalls *CallsT,
+	falseCalls *CallsT,
 	joinLambda *CallNodeT,
 	source token.Pos,
-	env *envT, calls *CallsT) {
+	calls *CallsT) {
 
-	if joinLambda == nil {
-		calls.BuildFinalCall("if", 2, trueCalls.First, falseCalls.First, cond)
-		calls.SetLastSource(source)
-	} else {
-		calls.BuildFinalCall("if", 2, trueCalls.First, falseCalls.First, cond)
-		calls.SetLastSource(source)
+	calls.BuildFinalCall("if", 2, trueCalls.First, falseCalls.First, cond)
+	calls.SetLastSource(source)
+	if joinLambda != nil {
 		calls.SetLast(joinLambda)
 	}
 }
@@ -617,9 +740,11 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 			}
 			return []NodeT{MakeLiteral(n, env.typeInfo.Types[x].Type)}
 		} else {
-			panic(fmt.Sprintf("unrecognized BasicLit type"))
+			panic(fmt.Sprintf("unrecognized BasicLit type %v '%s' at %s",
+				x.Kind, x.Value, source(x.Pos())))
 		}
 	case *ast.CompositeLit:
+		fmt.Printf("ast.CompositeLit: %s\n", source(x.Pos()))
 		inputs := cpsArguments(x.Elts, env, calls)
 		return makeExprCall("makeLiteral", x.Lbrace, x, env, calls, inputs...)
 	case *ast.UnaryExpr:
@@ -736,14 +861,14 @@ func cpsAndOrExpr(binaryExpr *ast.BinaryExpr, env *envT, calls *CallsT) []NodeT 
 	xCond := cpsExpr(binaryExpr.X, env, calls)[0]
 	yCond := cpsExpr(binaryExpr.Y, env, secondIf)[0]
 
-	makeIf(yCond, secondIfTrue, secondIfFalse, nil, binaryExpr.OpPos, env, secondIf)
+	makeIf(yCond, secondIfTrue, secondIfFalse, nil, binaryExpr.OpPos, secondIf)
 
 	if binaryExpr.Op.String() == "&&" {
 		ifFalse := makeBoolJump(joinVar, false)
-		makeIf(xCond, secondIf, ifFalse, nil, binaryExpr.OpPos, env, calls)
+		makeIf(xCond, secondIf, ifFalse, nil, binaryExpr.OpPos, calls)
 	} else {
 		ifTrue := makeBoolJump(joinVar, true)
-		makeIf(xCond, ifTrue, secondIf, nil, binaryExpr.OpPos, env, calls)
+		makeIf(xCond, ifTrue, secondIf, nil, binaryExpr.OpPos, calls)
 	}
 	calls.SetLast(joinLambda)
 	return []NodeT{MakeReferenceNode(valueVar)}
@@ -825,7 +950,7 @@ func makeExprCall(primop string,
 }
 
 func makeExprTypeCall(primop string,
-	source token.Pos,
+	pos token.Pos,
 	resultType types.Type,
 	env *envT,
 	calls *CallsT,
@@ -833,7 +958,7 @@ func makeExprTypeCall(primop string,
 
 	result := MakeVariable("v", resultType)
 	calls.AddPrimopVarsCall(primop, []*VariableT{result}, inputs...)
-	calls.SetLastSource(source)
+	calls.SetLastSource(pos)
 	return []NodeT{MakeReferenceNode(result)}
 }
 
@@ -870,6 +995,8 @@ func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 		}
 		if cellVar.HasFlag("cell") {
 			return &PointerLhsT{"cellRef", "cellSet", cellVar, x.NamePos}
+		} else if cellVar.HasFlag("package") {
+			return &PointerLhsT{"packageRef", "packageSet", cellVar, x.NamePos}
 		} else {
 			panic("non-cell variable in LHS")
 		}
@@ -925,7 +1052,7 @@ func (lhs *PointerLhsT) write(value NodeT, calls *CallsT) {
 // they really have.
 
 func (lhs *PointerLhsT) valueType() types.Type {
-	if lhs.readPrimop == "cellRef" {
+	if lhs.readPrimop == "cellRef" || lhs.readPrimop == "packageRef" {
 		return lhs.pointer.Type
 	} else {
 		return lhs.pointer.Type.(*types.Pointer).Elem()

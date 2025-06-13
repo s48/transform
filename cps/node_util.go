@@ -102,11 +102,7 @@ func (calls *CallsT) AppendCalls(more *CallsT) {
 	if more == nil {
 		return // nothing to do
 	}
-	if calls.First == nil {
-		calls.First = more.First
-	} else if more.First != nil {
-		AttachNext(calls.Last, more.First)
-	}
+	calls.AppendCall(more.First)
 	calls.Last = more.Last
 }
 
@@ -127,7 +123,9 @@ func (calls *CallsT) AppendCall(call *CallNodeT) {
 	if calls.First == nil {
 		calls.First = call
 	} else {
-		AttachNext(calls.Last, call)
+		// Adding at the end of calls.Last.Next makes it
+		// a lot easier to chain conditionals together.
+		AttachNext(calls.Last, call, len(calls.Last.Next)-1)
 	}
 	calls.Last = call
 }

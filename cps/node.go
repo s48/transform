@@ -215,12 +215,12 @@ func (node *CallNodeT) InputVariable(i int) *VariableT {
 }
 
 func (node *CallNodeT) String() string {
-	return fmt.Sprintf("{call %s}", CallString(node))
+	return fmt.Sprintf("{call %s_%d %s}", node.Name, node.Id, CallString(node))
 }
 
 func MakeCall(primop PrimopT, outputs []*VariableT, inputs ...NodeT) *CallNodeT {
-	id := nextVariableId
-	nextVariableId += 1
+	id := NextVariableId
+	NextVariableId += 1
 	call := &CallNodeT{CallType: CallExit,
 		Primop:  primop,
 		Id:      id,
@@ -292,11 +292,11 @@ func (vart *VariableT) HasFlag(flag string) bool {
 	return found
 }
 
-var nextVariableId = 0
+var NextVariableId = 0
 
 func MakeVariable(name string, typ types.Type, source ...token.Pos) *VariableT {
-	id := nextVariableId
-	nextVariableId += 1
+	id := NextVariableId
+	NextVariableId += 1
 	var src token.Pos
 	if 0 < len(source) {
 		src = source[0]
@@ -316,8 +316,8 @@ func MakeCellVariable(name string, typ types.Type, source ...token.Pos) *Variabl
 }
 
 func CopyVariable(vart *VariableT) *VariableT {
-	id := nextVariableId
-	nextVariableId += 1
+	id := NextVariableId
+	NextVariableId += 1
 	return &VariableT{Name: vart.Name, Id: id, Type: vart.Type, Source: vart.Source, Flags: maps.Clone(vart.Flags)}
 }
 
