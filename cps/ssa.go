@@ -164,7 +164,12 @@ func bindDominatees(block *cellBlockT) {
 		return
 	}
 	call := block.end.parent
-	if !(call.Primop.Name() == "let" || call.Primop.Name() == "letrec") {
+	switch call.Primop.Name() {
+	case "let":
+		call.Primop = LookupPrimop("letrec")
+	case "letrec":
+		// do nothing
+	default:
 		call = MakeCall(LookupPrimop("letrec"), []*VariableT{})
 		InsertCallParent(block.end, call)
 	}

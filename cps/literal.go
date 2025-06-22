@@ -29,8 +29,8 @@ func varsForLiterals(call *CallNodeT, vars map[string]*VariableT) {
 	addedValues := []string{}
 	if inputs != nil {
 		if len(inputs) != len(call.Inputs) {
-			panic(fmt.Sprintf("Primop %s returned %d input registers but has %d inputs.",
-				call.Primop.Name(), len(inputs), len(call.Inputs)))
+			panic(fmt.Sprintf("Primop %s returned %d input registers but has %d inputs. %s",
+				call.Primop.Name(), len(inputs), len(call.Inputs), call))
 		}
 		for i, input := range call.Inputs {
 			if inputs[i] == nil || !IsLiteralNode(input) {

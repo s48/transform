@@ -29,60 +29,15 @@ import (
 	"slices"
 
 	"go/types"
-
-	"github.com/s48/transform/util"
 )
 
 func AddStackFrames(proc *CallNodeT, frameType types.Type) {
 	blocks := FindBasicBlocks[*frameBlockT](proc, makeFrameBlock)
-	findDominators(blocks[0],
-		func(b *frameBlockT) []*frameBlockT { return b.next },
-		func(b *frameBlockT, d *frameBlockT) {
-			b.dominator = d
-			Push(&d.dominatees, b)
-		})
 
-	// Find loop headers by looking for edges whose tail dominates
-	// their head.  All blocks on paths upwards from the tail to the
-	// head are in the loop.
-	loopHeaders := []*frameBlockT{}
-	for _, block := range blocks {
-		for _, n := range block.next {
-			for dom := block.dominator; dom != blocks[0]; dom = dom.dominator {
-				if n == dom {
-					if len(n.backEdges) == 0 {
-						Push(&loopHeaders, n)
-					}
-					Push(&n.backEdges, block)
-					findLoopBlocks(n, block)
-					break
-				}
-			}
-		}
-	}
-
-	//	for _, block := range blocks[1:] {
-	//		block.loopHeader = blocks[0]
-	//	}
-
-	// Sort loops from biggest to smallest.
-	slices.SortFunc(loopHeaders,
-		func(x, y *frameBlockT) int {
-			return len(y.loopBlocks) - len(x.loopBlocks)
-		})
-
-	// The sorting means that outer loops are processed before inner
-	// loops, so that each loop ends up with its proper depth and
-	// immediate parent.
-	for _, header := range loopHeaders {
-		header.loopDepth += 1
-		header.loopParent = header.loopHeader
-		header.loopHeader = header
-		for child := range header.loopBlocks {
-			child.loopHeader = header
-			child.loopDepth = header.loopDepth
-		}
-	}
+	loopHeaders := FindLoopBlocks(
+		blocks,
+		func(block *frameBlockT) []*frameBlockT { return block.next },
+		setBlockLoop)
 
 	//	for _, loop := range loopHeaders {
 	//		fmt.Printf("loop: %s %d (%s)", loop, loop.loopDepth, loop.loopParent)
@@ -125,39 +80,22 @@ func AddStackFrames(proc *CallNodeT, frameType types.Type) {
 	// fmt.Printf("====== end frames ======\n")
 }
 
-// Walk up the 'previous' links from 'block' until you hit 'header',
-// adding everything to 'header's loopBlocks.
-
-func findLoopBlocks(header *frameBlockT, block *frameBlockT) {
-	if block == header || header.loopBlocks.Contains(block) {
-		return
-	}
-	header.loopBlocks.Add(block)
-	for _, prev := range block.previous {
-		findLoopBlocks(header, prev)
-	}
-}
-
 type frameBlockT struct {
 	start    *CallNodeT
 	end      *CallNodeT
 	next     []*frameBlockT
 	previous []*frameBlockT
 
-	dominator  *frameBlockT
-	dominatees []*frameBlockT
 	loopHeader *frameBlockT // nil if not in a loop
 	loopDepth  int
 
 	// Only loop headers have these.
-	backEdges  []*frameBlockT
-	loopBlocks util.SetT[*frameBlockT] // all blocks in the loop
-	loopParent *frameBlockT            // outer loop, if any
+	loopParent *frameBlockT // outer loop, if any
 	frameVar   *VariableT
 }
 
 func makeFrameBlock() *frameBlockT {
-	return &frameBlockT{loopBlocks: util.NewSet[*frameBlockT]()}
+	return &frameBlockT{}
 }
 
 func (block *frameBlockT) initialize(start *CallNodeT, end *CallNodeT) {
@@ -177,6 +115,17 @@ func (block *frameBlockT) getEnd() *CallNodeT {
 
 func (block *frameBlockT) String() string {
 	return fmt.Sprintf("%s_%d", block.start.Name, block.start.Id)
+}
+
+func setBlockLoop(
+	block *frameBlockT,
+	loopHeader *frameBlockT,
+	loopParent *frameBlockT,
+	loopDepth int) {
+
+	block.loopHeader = loopHeader
+	block.loopParent = loopParent
+	block.loopDepth = loopDepth
 }
 
 // How primops tell us that they do stack allocation.
