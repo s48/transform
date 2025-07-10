@@ -517,7 +517,6 @@ func cpsSwitchCaseCond(
 		call := MakeCall(LookupPrimop("if"), nil, value)
 		call.Next = []*CallNodeT{nil, nil}
 		AttachNext(call, trueCall)
-		fmt.Printf("cond %s\n", call)
 		calls.AppendCall(call)
 	}
 }
@@ -1023,6 +1022,13 @@ func assignCells(lhss []ast.Expr, values []NodeT, newOkay bool, env *envT, calls
 		panic(fmt.Sprintf("wrong number of values in assignment %d != %d", len(lhss), len(values)))
 	}
 	for i, lhs := range lhss {
+		switch x := lhs.(type) {
+		case *ast.Ident:
+			if x.Name == "_" {
+				Erase(values[i])
+				continue
+			}
+		}
 		cpsLhs(lhs, newOkay, env, calls).write(values[i], calls)
 	}
 }
