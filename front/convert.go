@@ -922,15 +922,13 @@ func cpsCalledExpr(expr ast.Expr, env *envT, calls *CallsT) (NodeT, NodeT) {
 			// non-const import from another package
 			case *types.PkgName:
 				return MakeReferenceNode(env.lookupVar(x.Sel)), nil
-			default:
-				// Method dispatch.
-				vart := env.lookupObj(env.typeInfo.ObjectOf(x.Sel).(*types.Func).Origin())
-				if vart == nil {
-					panic(fmt.Sprintf("no binding for method %s.%s", base.Name, x.Sel.Name))
-				}
-				return MakeReferenceNode(vart), cpsExpr(x.X, env, calls)[0]
 			}
 		}
+		vart := env.lookupObj(env.typeInfo.ObjectOf(x.Sel).(*types.Func).Origin())
+		if vart == nil {
+			panic(fmt.Sprintf("no binding for method %s", x.Sel.Name))
+		}
+		return MakeReferenceNode(vart), cpsExpr(x.X, env, calls)[0]
 	}
 	return cpsExpr(expr, env, calls)[0], nil
 }

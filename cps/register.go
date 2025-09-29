@@ -68,10 +68,12 @@ func (vart *VariableT) getValue() *valueT {
 
 // One use of a variable
 type regUseT struct {
-	callIndex int         // the index of the call containing the use
-	spillCost int         // cost heuristic for spilling this use
-	isWrite   bool        // true for outputs, false for inputs
-	spec      RegUseSpecT // register constraints
+	callIndex    int         // the index of the call containing the use
+	spillCost    int         // cost heuristic for spilling this use
+	callPriority int         // call priority of the block this is in
+	isWrite      bool        // true for outputs, false for inputs
+	spec         RegUseSpecT // register constraints
+	bundle       *bundleT    // the bundle this is in
 }
 
 const (
@@ -103,11 +105,12 @@ type RegisterT interface {
 type bundleT struct {
 	value           *valueT
 	Class           *RegisterClassT
-	allowedRegsMask uint64    // all the RegUseSpecT masks &'ed together
-	uses            []regUseT // needed for computing the cost
+	allowedRegsMask uint64     // all the RegUseSpecT masks &'ed together
+	uses            []*regUseT // needed for computing the cost
 	liveRange       liveRangeT
 	totalLength     int       // sum of interval lengths
-	spillCost       int       // sum of use weights
+	spillCost       int       // sum of use spill costs
+	callPriority    int       // max of use call priorities
 	Register        RegisterT // what gets assigned to this
 }
 
@@ -199,6 +202,9 @@ func (bundle *bundleT) addIntervals(other *bundleT) {
 		panic("union of conflicting bundle ranges")
 	}
 	bundle.uses = append(bundle.uses, other.uses...)
+	for _, use := range other.uses {
+		use.bundle = bundle
+	}
 	other.uses = nil
 	bundle.spillCost =
 		(bundle.spillCost*bundle.totalLength +
@@ -207,6 +213,68 @@ func (bundle *bundleT) addIntervals(other *bundleT) {
 	bundle.liveRange = *bundle.liveRange.union(&other.liveRange)
 }
 
+func (bundle *bundleT) initialize() bool {
+	vart := bundle.value.vars.Members()[0] // for error messages
+	var class *RegisterClassT
+	mask := ^uint64(0)
+	spillCost := 0
+	callPriority := 0
+	for _, use := range bundle.uses {
+		use.bundle = bundle
+		spillCost += use.spillCost
+		callPriority = max(callPriority, use.callPriority)
+		if use.spec.Class == jumpRegUseSpec.Class {
+			continue
+		}
+		if class == nil {
+			class = use.spec.Class
+		} else if use.spec.Class != class {
+			panic(fmt.Sprintf("value %s_%d has two register classes %s and %s (from call %s)", vart.Name, vart.Id,
+				use.spec.Class.Name, class.Name, vart.Binder))
+		}
+		mask &= use.spec.RegisterMask
+	}
+	if class == nil {
+		return false
+	}
+	// fmt.Printf("value class %s", class.Name)
+	// for vart, _ := range value.vars {
+	//		fmt.Printf(" %s_%v", vart.Name, vart.Id)
+	// }
+	// fmt.Printf("\n")
+	bundle.Class = class
+	bundle.allowedRegsMask = mask
+	bundle.spillCost = spillCost / bundle.totalLength
+	bundle.callPriority = callPriority
+	if mask == 0 {
+		panic(fmt.Sprintf("value %s_%d has no allowable registers", vart.Name, vart.Id))
+	}
+	return true
+}
+
+// The original bundle keeps everything before the conflict point and
+// we create a new bundle that has everything after the conflict
+// point.
+//
+// Need to handle the special case of the conflict point being the
+// first use.
+/*
+func (bundle *bundleT) split(conflictPoint int) {
+	newBundle := &bundleT{value: bundle.value, Class: bundle.Class}
+	bundle.uses = slices.DeleteFunc(bundle.uses,
+		func (use *regUseT) bool {
+			if use.CallIndex < conflictPoint {
+				return true
+			} else {
+				newBundle.uses = append(newBundle.uses, use)
+				return false
+			}
+		})
+	for i, interval := range bundle.liveRange.intervals {
+
+	}
+}
+*/
 //----------------------------------------------------------------
 // value methods
 
@@ -222,16 +290,27 @@ func (value *valueT) join(other *valueT) {
 
 // The spill cost formula is from Cranelift's allocator.
 
-func (value *valueT) addDefinition(index int, spec *RegUseSpecT, loopDepth int) {
-	weight := (1<<(min(loopDepth, 10)*2))*1000 + 2000
-	regUse := regUseT{callIndex: index, isWrite: true, spec: *spec, spillCost: weight}
-	value.bundle.uses = append(value.bundle.uses, regUse)
+func (value *valueT) addDefinition(vart *VariableT, index int, spec *RegUseSpecT, block *regBlockT) {
+	regUse := value.makeUse(index, spec, block.callPriority)
+	regUse.isWrite = true
+	regUse.spillCost = 1<<(min(block.loopDepth, 10)*2)*1000 + 2000
+	outputRegUses[vart] = regUse
 }
 
-func (value *valueT) addUse(index int, spec *RegUseSpecT, loopDepth int) {
-	weight := (1 << (min(loopDepth, 10) * 2)) * 1000
-	regUse := regUseT{callIndex: index, spec: *spec, spillCost: weight}
+func (value *valueT) addUse(node *ReferenceNodeT, index int, spec *RegUseSpecT, block *regBlockT) {
+	regUse := value.makeUse(index, spec, block.callPriority)
+	regUse.spillCost = (1 << (min(block.loopDepth, 10) * 2)) * 1000
+	inputRegUses[node] = regUse
+}
+
+func (value *valueT) makeUse(index int, spec *RegUseSpecT, callPriority int) *regUseT {
+	regUse := &regUseT{
+		callIndex:    index,
+		spec:         *spec,
+		callPriority: callPriority,
+		bundle:       value.bundle}
 	value.bundle.uses = append(value.bundle.uses, regUse)
+	return regUse
 }
 
 func (value *valueT) addInterval(start int, end int) {
@@ -265,41 +344,10 @@ func (value *valueT) addInterval(start int, end int) {
 func (value *valueT) initialize() bool {
 	bundle := value.bundle
 	slices.Reverse(bundle.liveRange.intervals)
-	vart := value.vars.Members()[0]
 	if len(bundle.uses) == 0 {
 		return false
 	}
-	var class *RegisterClassT
-	mask := ^uint64(0)
-	spillCost := 0
-	for _, use := range bundle.uses {
-		spillCost += use.spillCost
-		if use.spec.Class == jumpRegUseSpec.Class {
-			continue
-		}
-		if class == nil {
-			class = use.spec.Class
-		} else if use.spec.Class != class {
-			panic(fmt.Sprintf("value %s_%d has two register classes %s and %s", vart.Name, vart.Id,
-				use.spec.Class.Name, class.Name))
-		}
-		mask &= use.spec.RegisterMask
-	}
-	if class == nil {
-		return false
-	}
-	// fmt.Printf("value class %s", class.Name)
-	// for vart, _ := range value.vars {
-	//		fmt.Printf(" %s_%v", vart.Name, vart.Id)
-	// }
-	// fmt.Printf("\n")
-	bundle.Class = class
-	bundle.allowedRegsMask = mask
-	bundle.spillCost = spillCost / bundle.totalLength
-	if mask == 0 {
-		panic(fmt.Sprintf("value %s_%d has no allowable registers", vart.Name, vart.Id))
-	}
-	return true
+	return bundle.initialize()
 }
 
 // Variable ranges are found bottom up.  If the block ends with a
@@ -325,9 +373,16 @@ type regBlockT struct {
 	previous   []*regBlockT
 	isJump     bool
 	loopDepth  int
+	// Reversed breadth-first numbering in the call graph, so callers
+	// have a higher priority than callees.
+	callPriority int
+	seen         bool
 
 	bound util.SetT[*VariableT] // bound within the block
 	live  util.SetT[*VariableT] // live at block.start
+
+	inputSpecs  [][]*RegUseSpecT // cached for each call in the block
+	outputSpecs [][]*RegUseSpecT
 
 	// Only in the blocks of procedure nodes.
 	blocks     []*regBlockT // all the blocks in this procedure
@@ -353,10 +408,12 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 		block.calledFrom = util.NewSet[*CallNodeT]()
 		block.boundDuring = util.NewSet[*VariableT]()
 	}
-	call := start
-	count := 1
-	for {
+
+	for call := start; ; call = call.Next[0] {
 		inputs, outputs := call.Primop.RegisterUsage(call)
+		block.inputSpecs = append(block.inputSpecs, inputs)
+		block.outputSpecs = append(block.outputSpecs, outputs)
+
 		if outputs != nil {
 			if len(outputs) != len(call.Outputs) {
 				panic(fmt.Sprintf("Primop %s returned %d output registers but has %d outputs.",
@@ -385,13 +442,12 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 		if call == end {
 			break
 		}
-		count += 1
-		call = call.Next[0]
+
 	}
 	for vart, _ := range block.bound {
 		block.live.Remove(vart)
 	}
-	block.callCount = count
+	block.callCount = len(block.inputSpecs)
 }
 
 func (block *regBlockT) addNext(rawNext BasicBlockT) {
@@ -405,8 +461,9 @@ func (block *regBlockT) getEnd() *CallNodeT {
 }
 
 func AllocateRegisters(top *CallNodeT) {
-	random = rand.New(rand.NewSource(0))
 	makeVarsForLiterals()
+	random = rand.New(rand.NewSource(0))
+	regLinkInit()
 	procs := []*CallNodeT{}
 	top.SetFlag(1)
 	for lambda := range Lambdas {
@@ -442,16 +499,35 @@ func AllocateRegisters(top *CallNodeT) {
 		func(proc *CallNodeT) []*CallNodeT { return proc.Block.(*regBlockT).callsTo.Members() })
 	// Taking the components in order means that a procedure's call sites
 	// will be processed before the procedure is.
-	for _, comp := range components {
+	for i, comp := range components {
 		if len(comp) != 1 {
 			panic("Register allocation found recursion - time to write more code.")
 		}
-		setLoopDepths(comp[0])
+		// Reverse the call priority so that callers have a higher
+		// priority than callees.
+		setLoopDepths(comp[0], len(components)-i)
 	}
 
 	blocks := []*regBlockT{}
 	for _, proc := range procs {
-		blocks = append(blocks, proc.Block.(*regBlockT).blocks...)
+		todo := util.StackT[*regBlockT]{}
+		todo.Push(proc.Block.(*regBlockT))
+		for 0 < todo.Len() {
+			block := todo.Pop()
+			if !block.seen {
+				block.seen = true
+				blocks = append(blocks, block)
+				temp := slices.Clone(block.next)
+				// Use stable sort to stay deterministic.
+				sort.SliceStable(temp, func(i int, j int) bool {
+					return temp[i].loopDepth < temp[j].loopDepth
+				})
+				for _, next := range temp {
+					todo.Push(next)
+				}
+			}
+		}
+		//		blocks = append(blocks, proc.Block.(*regBlockT).blocks...)
 	}
 
 	/*
@@ -520,23 +596,28 @@ func AllocateRegisters(top *CallNodeT) {
 		}
 		/*
 			fmt.Printf("ranges %s_%d", vart.Name, vart.Id)
-			for _, interval := range vart.value.bundle.intervals {
+			for _, interval := range vart.value.bundle.liveRange.intervals {
 				fmt.Printf(" %d:%d", interval.start, interval.end)
 			}
 			fmt.Printf("\n")
 		*/
 	}
 
-	// Merge values across jumps where possible.
-	for _, block := range blocks {
-		if block.isJump {
-			findJumpConnections(block)
-		}
-	}
+	checkLinks()
 
-	// Get the bundles
+	// Sorting the bundles by call priority makes is so that we assign
+	// registers to procedures before doing so for the calls to them.
+	// The callers don't conflict with each other so they have fewer
+	// constraints than the procedure, which can't conflict with any
+	// of the call sites.
 	bundleQueue := util.MakePriorityQueue[*bundleT](
-		func(x, y *bundleT) bool { return x.totalLength < y.totalLength })
+		func(x, y *bundleT) bool {
+			if x.callPriority == y.callPriority {
+				return x.totalLength < y.totalLength
+			} else {
+				return x.callPriority < y.callPriority
+			}
+		})
 	for !valueQueue.Empty() {
 		value := valueQueue.Dequeue()
 		if value.bundle != nil {
@@ -632,6 +713,7 @@ func AllocateRegisters(top *CallNodeT) {
 	for _, vart := range vars {
 		vart.Register = vart.value.bundle.Register
 	}
+	regLinkInit() // we're done with this data
 }
 
 // Check if bundleRange conflicts with regRange.  If not, then the bundle
@@ -751,7 +833,7 @@ func propagateBoundDuring(proc *CallNodeT) {
 // its blocks.  The lambdas are processed top-down in the call tree,
 // so all call sites will already have loop depths.
 
-func setLoopDepths(lambda *CallNodeT) {
+func setLoopDepths(lambda *CallNodeT, callPriority int) {
 	callLoopDepth := 0
 	if lambda.parent != nil {
 		for _, ref := range lambdaBinding(lambda).Refs {
@@ -772,6 +854,7 @@ func setLoopDepths(lambda *CallNodeT) {
 			loopParent *regBlockT,
 			loopDepth int) {
 
+			block.callPriority = callPriority
 			block.loopDepth = callLoopDepth + loopDepth
 		})
 }
@@ -797,8 +880,11 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 		}
 	}
 	lateIndex := endIndex
+	i := block.callCount
 	for call := block.end; ; call = call.parent {
-		inputs, outputs := call.Primop.RegisterUsage(call)
+		i -= 1
+		inputs := block.inputSpecs[i]
+		outputs := block.outputSpecs[i]
 		/*
 			if outputs == nil {
 				for i, vart := range call.Outputs {
@@ -816,7 +902,7 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 					end, found := ends[vart]
 					if found {
 						index := lateIndex + outputs[i].PhaseOffset
-						vart.getValue().addDefinition(index, outputs[i], block.loopDepth)
+						vart.getValue().addDefinition(vart, index, outputs[i], block)
 						allVars.Add(vart)
 						// +1 for inclusive -> exclusive
 						vart.getValue().addInterval(index, end+1)
@@ -833,9 +919,10 @@ func findLiveRanges(top *CallNodeT, allVars *util.SetT[*VariableT]) {
 					continue
 				}
 				if IsReferenceNode(input) {
-					vart := input.(*ReferenceNodeT).Variable
+					node := input.(*ReferenceNodeT)
+					vart := node.Variable
 					index := lateIndex + inputs[i].PhaseOffset
-					vart.getValue().addUse(index, inputs[i], block.loopDepth)
+					vart.getValue().addUse(node, index, inputs[i], block)
 					_, found := ends[vart]
 					if !found {
 						ends[vart] = index
@@ -878,42 +965,92 @@ func getCalledProc(call *CallNodeT) *CallNodeT {
 	}
 }
 
-// Merge values across jumps where possible.
+//----------------------------------------------------------------
+// This mechanism allows primops to indicate that putting a pair of
+// bundles in the same register would eliminate a move instruction.
+// The linking happens before all bundles are created so we cache the
+// linked node and variable and only connect the bundles once they
+// have all been created.
 
-func findJumpConnections(block *regBlockT) {
-	vars := block.start.Outputs
-	for _, prev := range block.previous {
-		jump := prev.end
-		for i, vart := range vars {
-			if !IsReferenceNode(jump.Inputs[i+1]) {
-				continue
-			}
-			other := jump.Inputs[i+1].(*ReferenceNodeT).Variable
-			if vart.value != other.value {
-				checkJumpConnection(vart, other)
-			}
+type regLinkT struct {
+	from      *ReferenceNodeT
+	to        *VariableT
+	spillCost int
+}
+
+var inputRegUses map[*ReferenceNodeT]*regUseT
+var outputRegUses map[*VariableT]*regUseT
+var regLinks []*regLinkT
+
+func regLinkInit() {
+	inputRegUses = map[*ReferenceNodeT]*regUseT{}
+	outputRegUses = map[*VariableT]*regUseT{}
+	regLinks = nil
+}
+
+// Primops can implement this.
+type RegisterLinkerT interface {
+	LinkRegisters(call *CallNodeT)
+}
+
+func AddRegisterLink(vart *VariableT, rawNode NodeT) {
+	switch node := rawNode.(type) {
+	case *ReferenceNodeT:
+		// fmt.Printf("linking %s and %s\n", node.Variable, vart)
+		regLinks = append(regLinks, &regLinkT{node, vart, 0})
+	}
+}
+
+func checkLinks() {
+	missing := 0
+	for _, regLink := range regLinks {
+		refUse := inputRegUses[regLink.from]
+		if refUse != nil {
+			regLink.spillCost = refUse.spillCost
+		} else {
+			missing += 1
+		}
+	}
+	sort.Slice(regLinks, func(i, j int) bool {
+		// Process higher spill costs first.
+		return regLinks[j].spillCost < regLinks[i].spillCost
+	})
+	for _, regLink := range regLinks {
+		node := regLink.from
+		vart := regLink.to
+		refUse := inputRegUses[node]
+		defUse := outputRegUses[vart]
+		if defUse == nil || refUse == nil {
+			continue
+		}
+		if !(defUse.bundle.Class == nil ||
+			refUse.bundle.Class == nil ||
+			defUse.bundle.Class == refUse.bundle.Class) {
+
+			panic(fmt.Sprintf("linking registers with different classes: %s and %s",
+				vart, node.Variable))
+		}
+		bundleA := refUse.bundle
+		bundleB := defUse.bundle
+		if !bundleA.liveRange.conflicts(&bundleB.liveRange) {
+			// fmt.Printf("linking %s and %s\n", vart, node.Variable)
+			bundleA.value.join(bundleB.value)
 		}
 	}
 }
 
-// 'vart' is passed the value of 'other' at a jump.  Merge there
-// values if they do not conflict.
+// Called by the jump primop's RegisterUsage method.
+func LinkJumpRegisters(call *CallNodeT) {
+	target := CalledLambda(call)
+	for i, vart := range target.Outputs {
+		AddRegisterLink(vart, call.Inputs[i+1])
+	}
+}
 
-func checkJumpConnection(vart *VariableT, other *VariableT) {
-	if other.value == nil {
-		panic(fmt.Sprintf("jump connection has no value %s_%d", other.Name, other.Id))
-	}
-	if other.value.bundle == nil {
-		panic(fmt.Sprintf("jump connection value has no bundle %s_%d", other.Name, other.Id))
-	}
-	if !(vart.value.bundle.Class == nil ||
-		other.value.bundle.Class == nil ||
-		vart.value.bundle.Class == other.value.bundle.Class) {
-
-		panic(fmt.Sprintf("jump connection value bundle has no class %s_%d", other.Name, other.Id))
-	}
-	if !vart.value.bundle.liveRange.conflicts(&other.value.bundle.liveRange) {
-		// fmt.Printf("jump connect %s_%d %s_%d\n", vart.Name, vart.Id, other.Name, other.Id)
-		vart.value.join(other.value)
+// Ditto for procedure calls.
+func LinkCallRegisters(call *CallNodeT) {
+	target := CalledLambda(call)
+	for i, vart := range target.Outputs[2:] {
+		AddRegisterLink(vart, call.Inputs[i+2])
 	}
 }
