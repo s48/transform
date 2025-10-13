@@ -18,29 +18,34 @@ func init() { fmt.Scanf("") } // appease the import gods
 // We just have one register class.
 
 type registerT struct {
-	class *RegisterClassT
-	name  string
+	class  *RegisterClassT
+	name   string
+	number int
 }
 
-func (reg *registerT) Class() *RegisterClassT { return reg.class }
-func (reg *registerT) String() string         { return reg.name }
+func (reg *registerT) SetClass(class *RegisterClassT) { reg.class = class }
+func (reg *registerT) Class() *RegisterClassT         { return reg.class }
+func (reg *registerT) String() string                 { return reg.name }
+func (reg *registerT) Number() int                    { return reg.number }
 
 const (
 	numRegs     = 6
 	allRegsMask = (1 << numRegs) - 1
 )
 
-var generalRegister = &RegisterClassT{Name: "r", Registers: make([]RegisterT, numRegs)}
+var generalRegister = &RegisterClassT{Name: "r"}
 
 var procOutputSpecs = make([]*RegUseSpecT, numRegs+1)
-var inputSpec = &RegUseSpecT{PhaseOffset: EarlyRegUse, Class: generalRegister, RegisterMask: allRegsMask}
-var outputSpec = &RegUseSpecT{Class: generalRegister, RegisterMask: allRegsMask}
+var inputSpec = &RegUseSpecT{PhaseOffset: EarlyRegUse, Class: generalRegister}
+var outputSpec = &RegUseSpecT{Class: generalRegister}
 
 func init() {
+	registers := make([]RegisterT, numRegs)
 	for i := range numRegs {
-		generalRegister.Registers[i] = &registerT{generalRegister, "r" + strconv.Itoa(i)}
-		procOutputSpecs[i] = &RegUseSpecT{Class: generalRegister, RegisterMask: 1 << i}
+		registers[i] = &registerT{generalRegister, "r" + strconv.Itoa(i), i}
+		procOutputSpecs[i] = &RegUseSpecT{Class: generalRegister}
 	}
+	generalRegister.SetRegisters(registers, allRegsMask)
 }
 
 func registerUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {

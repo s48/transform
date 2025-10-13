@@ -11,12 +11,13 @@ import (
 
 // Wrapper type to hide the sort and heap interface methods.
 
-type PriorityQueueT[T any] struct {
+type PriorityQueueT[T comparable] struct {
 	queue priorityQueueT[T]
+	cells map[T]*cellT[T] // so we can up date priorities
 }
 
-func MakePriorityQueue[T any](less func(x T, y T) bool) *PriorityQueueT[T] {
-	return &PriorityQueueT[T]{priorityQueueT[T]{less: less}}
+func MakePriorityQueue[T comparable](less func(x T, y T) bool) *PriorityQueueT[T] {
+	return &PriorityQueueT[T]{priorityQueueT[T]{less: less}, map[T]*cellT[T]{}}
 }
 
 func (pq *PriorityQueueT[T]) Len() int {
@@ -28,40 +29,64 @@ func (pq *PriorityQueueT[T]) Empty() bool {
 }
 
 func (pq *PriorityQueueT[T]) Enqueue(x T) {
-	heap.Push(&pq.queue, x)
+	cell := &cellT[T]{value: x}
+	pq.cells[x] = cell
+	heap.Push(&pq.queue, cell)
 }
 
 func (pq *PriorityQueueT[T]) Dequeue() T {
-	return heap.Pop(&pq.queue).(T)
+	cell := heap.Pop(&pq.queue).(*cellT[T])
+	delete(pq.cells, cell.value)
+	return cell.value
+}
+
+func (pq *PriorityQueueT[T]) Peek() T {
+	return pq.queue.queue[0].value
+}
+
+func (pq *PriorityQueueT[T]) Update(value T) {
+	cell := pq.cells[value]
+	if cell != nil {
+		heap.Fix(&pq.queue, cell.index)
+	}
 }
 
 // The actual priority queue.
 
-type priorityQueueT[T any] struct {
-	queue []T
+type priorityQueueT[T comparable] struct {
+	queue []*cellT[T]
 	less  func(x T, y T) bool
+}
+
+type cellT[T any] struct {
+	value T
+	index int
 }
 
 func (pq priorityQueueT[T]) Len() int { return len(pq.queue) }
 
 func (pq priorityQueueT[T]) Less(i, j int) bool {
-	return pq.less(pq.queue[j], pq.queue[i])
+	return pq.less(pq.queue[j].value, pq.queue[i].value)
 }
 
 func (pq priorityQueueT[T]) Swap(i, j int) {
 	pq.queue[i], pq.queue[j] = pq.queue[j], pq.queue[i]
+	pq.queue[i].index = i
+	pq.queue[j].index = j
 }
 
 func (pq *priorityQueueT[T]) Push(x any) {
-	pq.queue = append(pq.queue, x.(T))
+	n := len(pq.queue)
+	cell := x.(*cellT[T])
+	cell.index = n
+	pq.queue = append(pq.queue, cell)
 }
 
 func (pq *priorityQueueT[T]) Pop() any {
 	queue := pq.queue
 	newLength := len(queue) - 1
-	item := queue[newLength]
-	var defaultValue T
-	queue[newLength] = defaultValue // reinitialize for safety
+	cell := queue[newLength]
+	queue[newLength] = nil // GC safety
 	pq.queue = queue[0:newLength]
-	return item
+	return cell
 }
