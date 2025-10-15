@@ -41,7 +41,7 @@ package cps
 
 import (
 	"fmt"
-	"math/bits"
+	"math/big"
 	"slices"
 	"sort"
 	"strings"
@@ -106,12 +106,12 @@ type RegisterClassT struct {
 	registerIndex map[RegisterT]int
 }
 
-func (class *RegisterClassT) SetRegisters(allRegisters []RegisterT, usableMask uint64) {
+func (class *RegisterClassT) SetRegisters(allRegisters []RegisterT, usableMask *big.Int) {
 	registerIndex := map[RegisterT]int{}
 	usable := []RegisterT{}
 	for i, reg := range allRegisters {
 		reg.SetClass(class)
-		if (usableMask>>i)&1 == 1 {
+		if usableMask.Bit(i) == 1 {
 			registerIndex[reg] = len(usable)
 			usable = append(usable, reg)
 		}
@@ -709,20 +709,23 @@ func AllocateRegisters(top *CallNodeT) {
 	for 0 < colorable.Len() {
 		bundle := colorable.Pop()
 		regClass := bundle.class
-		mask := (uint64(1) << bundle.minReg) - 1
+		// mask = (1 << bundle.minReg) - 1
+		var mask big.Int
+		mask.Sub(mask.Lsh(big.NewInt(1), uint(bundle.minReg)), big.NewInt(1))
 		for _, conflict := range bundle.conflicts.Members() {
 			reg := conflict.Register
 			if reg != nil {
-				mask |= 1 << regClass.registerIndex[reg]
+				mask.SetBit(&mask, regClass.registerIndex[reg], 1)
 			}
 		}
-		mask = ^mask
-		if mask == 0 {
+		mask.Not(&mask)
+		if mask.BitLen() == 0 {
 			panic("no register available")
 		}
-		bundle.Register = regClass.registers[bits.TrailingZeros64(mask)]
+		regIndex := trailingZeros(&mask)
+		bundle.Register = regClass.registers[regIndex]
 		if bundle.Register == nil {
-			panic(fmt.Sprintf("no register %d in class %s", bits.TrailingZeros64(mask), regClass.Name))
+			panic(fmt.Sprintf("no register %d in class %s", regIndex, regClass.Name))
 		}
 	}
 
@@ -730,6 +733,15 @@ func AllocateRegisters(top *CallNodeT) {
 		vart.Register = vart.value.bundle.Register
 	}
 	regLinkInit() // we're done with this data
+}
+
+func trailingZeros(n *big.Int) int {
+	for i := 0; i < n.BitLen(); i++ {
+		if n.Bit(i) == 1 {
+			return i
+		}
+	}
+	return -1
 }
 
 // First find the maximum loop depth of any call to 'lambda', then

@@ -7,6 +7,7 @@ package cps
 
 import (
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"go/constant"
@@ -29,8 +30,7 @@ func (reg *registerT) String() string                 { return reg.name }
 func (reg *registerT) Number() int                    { return reg.number }
 
 const (
-	numRegs     = 6
-	allRegsMask = (1 << numRegs) - 1
+	numRegs = 6
 )
 
 var generalRegister = &RegisterClassT{Name: "r"}
@@ -45,7 +45,10 @@ func init() {
 		registers[i] = &registerT{generalRegister, "r" + strconv.Itoa(i), i}
 		procOutputSpecs[i] = &RegUseSpecT{Class: generalRegister}
 	}
-	generalRegister.SetRegisters(registers, allRegsMask)
+	// allRegsMask = (1 << numRegs) - 1
+	var allRegsMask big.Int
+	allRegsMask.Sub(allRegsMask.Lsh(big.NewInt(1), numRegs), big.NewInt(1))
+	generalRegister.SetRegisters(registers, &allRegsMask)
 }
 
 func registerUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
