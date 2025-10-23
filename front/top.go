@@ -34,14 +34,18 @@ type FrontEndT struct {
 	TypesInfo       *types.Info
 
 	defaultImporter types.ImporterFrom
+	buildContext    build.Context
 	builtinPackages []string
 	builtinDirs     SetT[string]
 	packageMap      map[string]*PackageT
 }
 
-func MakeFrontEnd(builtinPackages []string) *FrontEndT {
+func MakeFrontEnd(builtinPackages []string, buildTags []string) *FrontEndT {
+	buildContext := build.Default
+	buildContext.BuildTags = buildTags
 	return &FrontEndT{
 		defaultImporter: importer.Default().(types.ImporterFrom),
+		buildContext:    buildContext,
 		builtinPackages: builtinPackages,
 		builtinDirs:     NewSet[string](),
 		packageMap:      map[string]*PackageT{},
@@ -67,7 +71,7 @@ type PackageT struct {
 // Load a package for compilation, along with whatever it imports.
 
 func (frontEnd *FrontEndT) LoadPackage(sourceDir string) {
-	buildPkg, err := build.ImportDir(sourceDir, 0)
+	buildPkg, err := frontEnd.buildContext.ImportDir(sourceDir, 0)
 	if err != nil {
 		panic(fmt.Sprintf("Error importing from directory '%s': %s", sourceDir, err))
 	}
@@ -109,7 +113,7 @@ func (frontEnd *FrontEndT) loadImports(buildPkg *build.Package) {
 	for _, imported := range buildPkg.Imports {
 		sourceDir, pkg := frontEnd.findImportPackage(imported, buildPkg.Dir)
 		if pkg == nil {
-			importedPkg, err := build.ImportDir(sourceDir, 0)
+			importedPkg, err := frontEnd.buildContext.ImportDir(sourceDir, 0)
 			if err != nil {
 				panic(fmt.Sprintf("Could not import package from '%s'", sourceDir))
 			}
