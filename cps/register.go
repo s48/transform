@@ -702,7 +702,7 @@ func AllocateRegisters(top *CallNodeT) {
 		colorable.Push(bundle)
 		for _, conflict := range bundle.conflicts.Members() {
 			conflict.numConflicts -= 1
-			coloringQueue.Update(bundle)
+			coloringQueue.Update(conflict)
 		}
 	}
 
