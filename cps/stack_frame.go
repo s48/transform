@@ -133,10 +133,10 @@ type StackAllocator interface {
 	IsStackAllocator() bool
 }
 
-func IsStackAllocator(primop PrimopT) bool {
-	switch primop.(type) {
+func IsStackAllocator(rawPrimop PrimopT) bool {
+	switch primop := rawPrimop.(type) {
 	case StackAllocator:
-		return true
+		return primop.IsStackAllocator()
 	default:
 		return false
 	}
