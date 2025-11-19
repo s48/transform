@@ -57,7 +57,7 @@ func MakeFrontEnd(builtinPackages []string, buildTags []string) *FrontEndT {
 			Instances: map[*ast.Ident]types.Instance{}}}
 }
 
-// This our representation of a package, which contains both go/build
+// This is our representation of a package, which contains both go/build
 // and go/types packages.
 
 type PackageT struct {
