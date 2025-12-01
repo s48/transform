@@ -250,10 +250,21 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 		after := makeExprCall("+", x.TokPos, x.X, env, calls, before, deltaNode)[0]
 		lhs.write(after, calls)
 	case *ast.ReturnStmt:
+		var values []NodeT
+		if len(x.Results) != 1 {
+			values = cpsArguments(x.Results, env, calls)
+		} else {
+			switch result := x.Results[0].(type) {
+			case *ast.CallExpr:
+				values = cpsCallExpr(result, env, calls)
+			default:
+				values = cpsArguments(x.Results, env, calls)
+			}
+		}
 		// Use Map to convert []NodeT to []Any to satisfy Go's type checking.
-		values := Map(func(x NodeT) any { return x }, cpsArguments(x.Results, env, calls))
-		values = append([]any{env.returnVars.Top()}, values...)
-		calls.BuildFinalCall("return", 0, values...)
+		anyValues := Map(func(x NodeT) any { return x }, values)
+		anyValues = append([]any{env.returnVars.Top()}, anyValues...)
+		calls.BuildFinalCall("return", 0, anyValues...)
 		calls.SetLastSource(x.Return)
 	case *ast.LabeledStmt:
 		cpsStmt(x.Stmt, env, calls)
@@ -743,7 +754,6 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 				x.Kind, x.Value, source(x.Pos())))
 		}
 	case *ast.CompositeLit:
-		fmt.Printf("ast.CompositeLit: %s\n", source(x.Pos()))
 		inputs := cpsArguments(x.Elts, env, calls)
 		return makeExprCall("makeLiteral", x.Lbrace, x, env, calls, inputs...)
 	case *ast.UnaryExpr:

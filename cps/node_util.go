@@ -139,10 +139,11 @@ func (calls *CallsT) SetLast(call *CallNodeT) {
 		calls.First = call
 	}
 	calls.Last = call
+	calls.recent = call
 }
 
 func (calls *CallsT) SetLastSource(source token.Pos) {
-	for call := calls.recent; ; call = call.Next[0] {
+	for call := calls.recent; len(call.Next) == 1; call = call.Next[0] {
 		call.source = source
 		for _, vart := range call.Outputs {
 			if vart != nil && vart.Source == 0 {
