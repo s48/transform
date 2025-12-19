@@ -29,8 +29,20 @@ func (set SetT[E]) Add(members ...E) {
 	}
 }
 
+func (set SetT[E]) AddSet(other SetT[E]) {
+	for member, _ := range other {
+		set[member] = struct{}{}
+	}
+}
+
 func (set SetT[E]) Remove(member E) {
 	delete(set, member)
+}
+
+func (set SetT[E]) RemoveSet(other SetT[E]) {
+	for member, _ := range other {
+		delete(set, member)
+	}
 }
 
 // Removes one member of the set and returns it.

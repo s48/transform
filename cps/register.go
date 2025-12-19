@@ -42,6 +42,7 @@ package cps
 import (
 	"fmt"
 	"math/bits"
+	"math/rand"
 	"slices"
 	"sort"
 	"strings"
@@ -123,6 +124,62 @@ func (class *RegisterClassT) SetRegisters(allRegisters []RegisterT, usableMask u
 func (class *RegisterClassT) numRegisters() int {
 	return len(class.registers)
 }
+
+// Use masks for register sets, as is traditional.
+type registerSetT uint64
+
+func (class *RegisterClassT) newRegisterSet(minimumReg ...int) registerSetT {
+	mask := (uint64(1) << len(class.registers)) - 1
+	if len(minimumReg) != 0 {
+		mask &= ^((uint64(1) << minimumReg[0]) - 1)
+	}
+	return registerSetT(mask)
+}
+
+func (class *RegisterClassT) removeRegister(
+	set registerSetT,
+	reg RegisterT,
+) registerSetT {
+	return set & ^(1 << class.registerIndex[reg])
+}
+
+// Return the lowest-numbered register in the set.
+func (class *RegisterClassT) firstRegister(set registerSetT) RegisterT {
+	mask := uint64(set)
+	if mask == 0 {
+		panic("no register available")
+	}
+	index := bits.TrailingZeros64(mask)
+	reg := class.registers[index]
+	if reg == nil {
+		panic(fmt.Sprintf("no register %d in class %s", index, class.Name))
+	}
+	return reg
+}
+
+func (class *RegisterClassT) randomRegister(
+	set registerSetT,
+	random *rand.Rand,
+) RegisterT {
+	mask := uint64(set)
+	count := bits.OnesCount64(mask)
+	if count == 0 {
+		panic(fmt.Sprintf("empty register set for class %s", class.Name))
+	}
+	index := random.Intn(count)
+	for i := 0; ; i++ {
+		if (mask & (1 << i)) != 0 {
+			if 0 < index {
+				index -= 1
+			} else {
+				return class.registers[i]
+			}
+		}
+	}
+	panic("bit not found in register set")
+}
+
+//----------------------------------------------------------------
 
 type RegisterT interface {
 	SetClass(*RegisterClassT) // for initialization
@@ -271,16 +328,38 @@ func (bundle *bundleT) initialize() bool {
 }
 
 // Returns the vector of live bundle sets for the bundle's register class.
-func (bundle *bundleT) liveBundles() []util.SetT[*bundleT] {
+func (bundle *bundleT) liveBundles() ([]util.SetT[*bundleT], []util.SetT[*bundleT]) {
 	result := liveBundles[bundle.class]
 	if result == nil {
-		result = make([]util.SetT[*bundleT], numProgramPoints)
-		for i := range result {
-			result[i] = util.NewSet[*bundleT]()
-		}
+		result = makeLiveBundles()
 		liveBundles[bundle.class] = result
+		liveBundleDiffs[bundle.class] = makeLiveBundles()
+	}
+	return result, liveBundleDiffs[bundle.class]
+}
+
+func makeLiveBundles() []util.SetT[*bundleT] {
+	result := make([]util.SetT[*bundleT], numProgramPoints)
+	for i := range result {
+		result[i] = util.NewSet[*bundleT]()
 	}
 	return result
+}
+
+// To get a bundle's conflicting bundles we need to union
+// together all of bundles from each of its intervals.
+// By caching the differences between consecutive
+// program points we only need to add in the changes
+// as we go through an interval, instead of adding in
+// the entire set.
+
+func makeLiveBundleDiffs() {
+	for class, bundles := range liveBundles {
+		diffs := liveBundleDiffs[class]
+		for i, set := range bundles[:len(bundles)-1] {
+			diffs[i+1] = bundles[i+1].Difference(set)
+		}
+	}
 }
 
 //----------------------------------------------------------------
@@ -341,7 +420,7 @@ func (value *valueT) addInterval(start int, end int) {
 		append(intervals, intervalT{start, end, value.bundle})
 }
 
-// - Reverses slices to go from bottom-up to top-down.
+// Reverses slices to go from bottom-up to top-down.
 // Returns false if no register needs to be allocated.
 
 func (value *valueT) initialize() bool {
@@ -385,7 +464,8 @@ type regBlockT struct {
 	callsTo    util.SetT[*CallNodeT]
 	calledFrom util.SetT[*CallNodeT]
 	// How many registers of each class are used in this procedure.
-	regCounts map[*RegisterClassT]int
+	regCounts   map[*RegisterClassT]int
+	liveBundles util.SetT[*bundleT]
 }
 
 func makeRegBlock() *regBlockT {
@@ -462,8 +542,11 @@ var numProgramPoints int
 // program point.
 var liveBundles map[*RegisterClassT][]util.SetT[*bundleT]
 
-// The procedure called, if any, at each program point.
-var procCalls []*regBlockT
+// What's added from the previous program point.
+var liveBundleDiffs map[*RegisterClassT][]util.SetT[*bundleT]
+
+// Procedure calls, indexed by program point.
+var procCalls map[int]*regBlockT
 
 func AllocateRegisters(top *CallNodeT) {
 	makeVarsForLiterals()
@@ -537,8 +620,9 @@ func AllocateRegisters(top *CallNodeT) {
 	}
 
 	liveBundles = map[*RegisterClassT][]util.SetT[*bundleT]{}
+	liveBundleDiffs = map[*RegisterClassT][]util.SetT[*bundleT]{}
 	numProgramPoints = index * 3
-	procCalls = make([]*regBlockT, numProgramPoints)
+	procCalls = map[int]*regBlockT{}
 
 	// Transitive closure of live variables.
 	change := true
@@ -606,24 +690,13 @@ func AllocateRegisters(top *CallNodeT) {
 		if value.bundle != nil {
 			bundle := value.bundle
 			bundles = append(bundles, bundle)
-			liveBundles := bundle.liveBundles()
+			liveBundles, _ := bundle.liveBundles()
 			for _, interval := range bundle.liveRange.intervals {
 				for i := interval.start; i < interval.end; i++ {
 					liveBundles[i].Add(bundle)
 				}
 			}
 		}
-	}
-
-	// Get the conflicts for each bundle.
-	for _, bundle := range bundles {
-		liveBundles := bundle.liveBundles()
-		for _, interval := range bundle.liveRange.intervals {
-			for i := interval.start; i < interval.end; i++ {
-				bundle.conflicts = bundle.conflicts.Union(liveBundles[i])
-			}
-		}
-		bundle.conflicts.Remove(bundle)
 	}
 
 	// Determine the number of registers of each class that procedures require.
@@ -660,6 +733,24 @@ func AllocateRegisters(top *CallNodeT) {
 		}
 	}
 
+	// Get the conflicts for each bundle.
+	coloringQueue := util.MakePriorityQueue[*bundleT](
+		func(x, y *bundleT) bool { return y.numConflicts+y.minReg < x.numConflicts+x.minReg })
+	makeLiveBundleDiffs()
+
+	for _, bundle := range bundles {
+		liveBundles, diffs := bundle.liveBundles()
+		for _, interval := range bundle.liveRange.intervals {
+			bundle.conflicts.AddSet(liveBundles[interval.start])
+			for i := interval.start + 1; i < interval.end; i++ {
+				bundle.conflicts.AddSet(diffs[i])
+			}
+		}
+		bundle.conflicts.Remove(bundle)
+		bundle.numConflicts = len(bundle.conflicts)
+		coloringQueue.Enqueue(bundle)
+	}
+
 	fmt.Printf("Register use:\n")
 	maxName := 0
 	for _, comp := range components {
@@ -675,21 +766,6 @@ func AllocateRegisters(top *CallNodeT) {
 		}
 		slices.Sort(uses)
 		fmt.Printf("%s\n", strings.Join(uses, " "))
-	}
-
-	coloringQueue := util.MakePriorityQueue[*bundleT](
-		func(x, y *bundleT) bool { return y.numConflicts+y.minReg < x.numConflicts+x.minReg })
-
-	for _, bundle := range bundles {
-		liveBundles := bundle.liveBundles()
-		for _, interval := range bundle.liveRange.intervals {
-			for i := interval.start + 1; i < interval.end; i++ {
-				bundle.conflicts = bundle.conflicts.Union(liveBundles[i])
-			}
-		}
-		bundle.conflicts.Remove(bundle)
-		bundle.numConflicts = len(bundle.conflicts)
-		coloringQueue.Enqueue(bundle)
 	}
 
 	colorable := util.StackT[*bundleT]{}
@@ -709,22 +785,18 @@ func AllocateRegisters(top *CallNodeT) {
 	for 0 < colorable.Len() {
 		bundle := colorable.Pop()
 		regClass := bundle.class
-		mask := (uint64(1) << bundle.minReg) - 1
+		available := regClass.newRegisterSet(bundle.minReg)
 		for _, conflict := range bundle.conflicts.Members() {
 			reg := conflict.Register
 			if reg != nil {
-				mask |= 1 << regClass.registerIndex[reg]
+				available = regClass.removeRegister(available, reg)
 			}
 		}
-		mask = ^mask
-		if mask == 0 {
-			panic("no register available")
-		}
-		bundle.Register = regClass.registers[bits.TrailingZeros64(mask)]
-		if bundle.Register == nil {
-			panic(fmt.Sprintf("no register %d in class %s", bits.TrailingZeros64(mask), regClass.Name))
-		}
+		bundle.Register = regClass.firstRegister(available)
 	}
+
+	addProcCallConflicts(liveBundles, procCalls, components)
+	randomizeRegisters(bundles)
 
 	for _, vart := range vars {
 		vart.Register = vart.value.bundle.Register
@@ -966,5 +1038,89 @@ func LinkCallRegisters(call *CallNodeT) {
 	target := CalledLambda(call)
 	for i, vart := range target.Outputs[2:] {
 		AddRegisterLink(vart, call.Inputs[i+2])
+	}
+}
+
+//----------------------------------------------------------------
+// The register allocator uses a minimum number of registers in order
+// not to create conflicts between callers and callees.  This creates
+// artificial data depencencies that can slow down multi-issue
+// architectures.  So once we have a complete assignment of registers
+// we reassign them randomly in a way that avoids introducing conflicts.
+
+// Add the conflicts between bundles live in procedures
+// and those live when the procedures are called.
+
+func addProcCallConflicts(
+	liveBundles map[*RegisterClassT][]util.SetT[*bundleT],
+	procCalls map[int]*regBlockT,
+	components [][]*CallNodeT,
+) {
+	for regClass, bundles := range liveBundles {
+		for _, comp := range components {
+			block := comp[0].Block.(*regBlockT)
+			setProcLiveBundles(block, regClass)
+		}
+		for index, procBlock := range procCalls {
+			liveAtCall := bundles[index]
+			liveInProc := procBlock.liveBundles
+			for bundle := range liveAtCall {
+				bundle.conflicts.AddSet(liveInProc)
+			}
+			for bundle, _ := range liveInProc {
+				bundle.conflicts.AddSet(liveAtCall)
+			}
+		}
+	}
+}
+
+// Find all bundles that are live within a block, including those live
+// in any procedures it calls.
+
+func setProcLiveBundles(procBlock *regBlockT, regClass *RegisterClassT) {
+	live := util.NewSet[*bundleT]()
+	for _, block := range procBlock.blocks {
+		for vart, _ := range block.bound {
+			if vart.value != nil {
+				bundle := vart.value.bundle
+				if bundle.class == regClass {
+					live.Add(bundle)
+				}
+			}
+		}
+	}
+	for call, _ := range procBlock.callsTo {
+		live.AddSet(call.Block.(*regBlockT).liveBundles)
+	}
+	procBlock.liveBundles = live
+}
+
+// For each bundle pick a random register from the set of registers
+// that are not used by any conflicting bundle.  The outcome depends
+// on the order in which the bundles are processed.  Since I don't
+// know which orders are better or worse than others, they are
+// processed in a random order.
+//
+// Maybe go from fewer choices to more choices?
+//
+// Repeating this might do better and is unlikely to do worse.
+
+func randomizeRegisters(bundles []*bundleT) {
+	random := rand.New(rand.NewSource(18))
+	random.Shuffle(
+		len(bundles),
+		func(i, j int) {
+			bundles[i], bundles[j] = bundles[j], bundles[i]
+		})
+	for _, bundle := range bundles {
+		regClass := bundle.class
+		available := regClass.newRegisterSet()
+		for conflict, _ := range bundle.conflicts {
+			reg := conflict.Register
+			if reg != nil {
+				available = regClass.removeRegister(available, reg)
+			}
+		}
+		bundle.Register = regClass.randomRegister(available, random)
 	}
 }

@@ -110,7 +110,7 @@ func propagateLive(blocks []*cellBlockT) {
 			before := len(prev.live)
 			// If we had a separate 'add' set we could delay the 'Difference'
 			// call util 'prev' is dequeued.
-			prev.live = prev.live.Union(block.live.Difference(prev.written))
+			prev.live.AddSet(block.live.Difference(prev.written))
 			if !prev.queued && before < len(prev.live) {
 				todo.Enqueue(prev)
 				prev.queued = true
