@@ -65,13 +65,14 @@ type varRegAllocT struct {
 
 // The orignal calls this a "spill set".
 type valueT struct {
+	id     int // Used to break ties when sorting.
 	vars   util.SetT[*VariableT]
 	bundle *bundleT
 }
 
 func (vart *VariableT) getValue() *valueT {
 	if vart.value == nil {
-		value := &valueT{vars: util.NewSet(vart)}
+		value := &valueT{vars: util.NewSet(vart), id: vart.Id}
 		value.bundle = &bundleT{
 			value:     value,
 			conflicts: util.NewSet[*bundleT]()}
@@ -735,7 +736,13 @@ func AllocateRegisters(top *CallNodeT) {
 
 	// Get the conflicts for each bundle.
 	coloringQueue := util.MakePriorityQueue[*bundleT](
-		func(x, y *bundleT) bool { return y.numConflicts+y.minReg < x.numConflicts+x.minReg })
+		func(x, y *bundleT) bool {
+			if y.numConflicts+y.minReg == x.numConflicts+x.minReg {
+				// This keeps the queue deterministic.
+				return y.value.id < x.value.id
+			}
+			return y.numConflicts+y.minReg < x.numConflicts+x.minReg
+		})
 	makeLiveBundleDiffs()
 
 	for _, bundle := range bundles {

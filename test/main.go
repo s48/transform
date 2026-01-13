@@ -16,6 +16,7 @@ import (
 
 	"github.com/s48/transform/cps"
 	"github.com/s48/transform/front"
+	"github.com/s48/transform/util"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 
 	cps.DefinePrimops()
 
-	frontEnd := front.MakeFrontEnd(nil)
+	frontEnd := front.MakeFrontEnd(nil, nil)
 	frontEnd.LoadPackage("/home/kelsey/me/git/transform/test/test")
 	frontEnd.ParseAndTypeCheck()
 
@@ -48,6 +49,7 @@ func main() {
 		testVar := front.BindIdent(bindings.bindings, decl.Name, frontEnd.TypesInfo)
 		testVar.Flags["package"] = true
 		env := front.MakeEnv(frontEnd.TypesInfo, bindings)
+		cps.Lambdas = util.NewSet[*cps.CallNodeT]()
 		lambda := front.ConvertFuncDecl(decl, env)
 		front.SimplifyTopLevel(lambda)
 		cps.AllocateRegisters(lambda)

@@ -29,7 +29,7 @@ func (reg *registerT) String() string                 { return reg.name }
 func (reg *registerT) Number() int                    { return reg.number }
 
 const (
-	numRegs     = 6
+	numRegs     = 7
 	allRegsMask = (1 << numRegs) - 1
 )
 
