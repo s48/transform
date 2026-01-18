@@ -100,9 +100,20 @@ func IsNil(node NodeT) bool {
 
 type LiteralNodeT struct {
 	NodeBaseT
-	Value constant.Value
+	Value ConstantT
 	// types.Type is an easy-to-implement interface, so it's not Go specific.
 	Type types.Type
+}
+
+// The constant.Value interface is closed.  In order to allow other
+// kinds of constants we use our own interface, which is the same
+// as constant.Value minus the Kind() method.
+//
+// Any two equal constants must return the same ExactStrings and any
+// two unequal constants must return different ExactStrings.
+type ConstantT interface {
+	String() string
+	ExactString() string
 }
 
 func (node *LiteralNodeT) NodeType() NodeTypeT { return LiteralNode }
@@ -110,6 +121,15 @@ func (node *LiteralNodeT) IsNil() bool         { return node == nil }
 func (node *LiteralNodeT) IsValue() bool       { return true }
 func (node *LiteralNodeT) String() string {
 	return node.Value.ExactString()
+}
+
+func (node *LiteralNodeT) Constant() constant.Value {
+	value, okay := node.Value.(constant.Value)
+	if !okay {
+		panic(fmt.Sprintf("Literal has non-constant.Value value: %s",
+			value.ExactString()))
+	}
+	return value
 }
 
 // The front end gets constant.Value objects for constants so for those
@@ -120,11 +140,8 @@ func MakeLiteral(value any, typ types.Type) *LiteralNodeT {
 	if typ == nil {
 		panic("MakeLiteral got nil type\n")
 	}
-	var v constant.Value
-	switch constantValue := value.(type) {
-	case constant.Value:
-		v = constantValue
-	default:
+	v, okay := value.(constant.Value)
+	if !okay {
 		v = constant.Make(value)
 	}
 	// A nil value means that this a literal Go type, such as the type

@@ -374,9 +374,9 @@ func simplifyCond(call *CallNodeT, tok token.Token) {
 	y := call.Inputs[1]
 	if IsLiteralNode(x) && IsLiteralNode(y) {
 		nextIndex := 1
-		if constant.Compare(x.(*LiteralNodeT).Value,
+		if constant.Compare(x.(*LiteralNodeT).Constant(),
 			tok,
-			y.(*LiteralNodeT).Value) {
+			y.(*LiteralNodeT).Constant()) {
 
 			nextIndex = 0
 		}
@@ -411,9 +411,9 @@ func SimplifyArithBinop(call *CallNodeT) {
 	if IsLiteralNode(x) {
 		if IsLiteralNode(y) {
 			xLit := x.(*LiteralNodeT)
-			xLit.Value = constant.BinaryOp(xLit.Value,
+			xLit.Value = constant.BinaryOp(xLit.Constant(),
 				goOpToken[call.Primop.Name()],
-				y.(*LiteralNodeT).Value)
+				y.(*LiteralNodeT).Constant())
 			DetachInput(y)
 			RemoveNullInputs(call, 1)
 			call.Primop = LookupPrimop("let")

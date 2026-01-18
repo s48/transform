@@ -103,7 +103,7 @@ func (env *RegEnvT) Set(vart *VariableT, rawValue any) {
 func NodeValue(rawNode NodeT, env EnvT) any {
 	switch node := rawNode.(type) {
 	case *LiteralNodeT:
-		switch node.Value.Kind() {
+		switch node.Constant().Kind() {
 		case constant.Int:
 			n, err := strconv.ParseInt(node.Value.ExactString(), 0, 64)
 			if err != nil {
