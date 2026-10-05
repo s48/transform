@@ -315,7 +315,7 @@ type IfPrimopT struct{}
 
 func (primop *IfPrimopT) Name() string             { return "if" }
 func (primop *IfPrimopT) SideEffects() bool        { return false }
-func (primop *IfPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
+func (primop *IfPrimopT) Simplify(call *CallNodeT) { simplifyIf(call) }
 func (primop *IfPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	panic("Generating code for " + primop.Name())
 }
@@ -325,6 +325,22 @@ func (primop *IfPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) 
 	} else {
 		return call.Next[1], env
 	}
+}
+
+func simplifyIf(call *CallNodeT) {
+	x := call.Inputs[0]
+	if IsLiteralNode(x) {
+		value := x.(*LiteralNodeT).Constant()
+		if value.Kind() == constant.Bool {
+			nextIndex := 1
+			if constant.BoolVal(value) {
+				nextIndex = 0
+			}
+			ReplaceNext(call, DetachNext(call.Next[nextIndex]))
+			return
+		}
+	}
+	DefaultSimplify(call)
 }
 
 type IfLtPrimopT struct{}

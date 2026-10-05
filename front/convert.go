@@ -24,7 +24,7 @@ type envT struct {
 	// Type information from the Go front end.
 	typeInfo *types.Info
 	// types.Obj -> package variable
-	packageBindings PackageBindingsT
+	packageBindings BindingsT
 	// types.Obj -> lexically-bound variable
 	bindings BindingsT
 	// For adding 'makeCell' calls at the beginning.
@@ -44,7 +44,7 @@ type envT struct {
 
 type BindingsT map[types.Object]*VariableT
 
-func BindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *VariableT {
+func bindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *VariableT {
 	obj := typeInfo.ObjectOf(ident)
 	if obj == nil {
 		panic("no type object for identifier '" + ident.Name + "'")
@@ -54,8 +54,15 @@ func BindIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *Vari
 	return vart
 }
 
-type PackageBindingsT interface {
-	LookupVar(obj types.Object) *VariableT
+func BindPackageIdent(bindings BindingsT, ident *ast.Ident, typeInfo *types.Info) *VariableT {
+	obj := typeInfo.ObjectOf(ident)
+	if obj == nil {
+		panic("no type object for identifier '" + ident.Name + "'")
+	}
+	vart := MakeVariable(ident.Name, obj.Type(), ident.Pos())
+	vart.Flags["package"] = true
+	bindings[obj] = vart
+	return vart
 }
 
 // 'break' with a label means to jump to the statement after the labeled for/switch/select
@@ -72,7 +79,7 @@ type PackageBindingsT interface {
 // a second one for break, and a third for continue.  At this point we don't
 // handle labels for break and continue.
 
-func MakeEnv(typeInfo *types.Info, pkgBindings PackageBindingsT) *envT {
+func MakeEnv(typeInfo *types.Info, pkgBindings BindingsT) *envT {
 	return &envT{
 		typeInfo:         typeInfo,
 		packageBindings:  pkgBindings,
@@ -82,7 +89,7 @@ func MakeEnv(typeInfo *types.Info, pkgBindings PackageBindingsT) *envT {
 }
 
 func (env *envT) bindVar(ident *ast.Ident) *VariableT {
-	return BindIdent(env.bindings, ident, env.typeInfo)
+	return bindIdent(env.bindings, ident, env.typeInfo)
 }
 
 func (env *envT) bindCellVar(ident *ast.Ident) *VariableT {
@@ -108,7 +115,7 @@ func (env *envT) lookupObj(obj types.Object) *VariableT {
 	if found {
 		return vart
 	}
-	return env.packageBindings.LookupVar(obj)
+	return env.packageBindings[obj]
 }
 
 //----------------------------------------------------------------
