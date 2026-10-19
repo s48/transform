@@ -487,6 +487,17 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	}
 	for call := start; ; call = call.Next[0] {
 		inputs, outputs := call.Primop.RegisterUsage(call)
+		for _, spec := range inputs {
+			if spec != nil && spec.Class.Name == "r" {
+				panic(fmt.Sprintf("bad spec from call %s", call))
+			}
+		}
+		for _, spec := range outputs {
+			if spec != nil && spec.Class.Name == "r" {
+				panic(fmt.Sprintf("bad spec from call %s", call))
+			}
+		}
+
 		block.inputSpecs = append(block.inputSpecs, inputs)
 		block.outputSpecs = append(block.outputSpecs, outputs)
 

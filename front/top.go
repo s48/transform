@@ -1,4 +1,4 @@
-// Copyright 2024 Richard Kelsey. All rights reserved.
+// Copyright 2026 Richard Kelsey. All rights reserved.
 // See file LICENSE for notices and license.
 
 // Converting Go ASTs into CPS.
@@ -38,6 +38,10 @@ type FrontEndT struct {
 	builtinPackages []string
 	builtinDirs     SetT[string]
 	packageMap      map[string]*PackageT
+
+	Bindings BindingsT
+	Funcs    map[*VariableT]*ast.FuncDecl
+	Values   map[*VariableT]ast.Expr
 }
 
 func MakeFrontEnd(builtinPackages []string, buildTags []string) *FrontEndT {
@@ -50,6 +54,9 @@ func MakeFrontEnd(builtinPackages []string, buildTags []string) *FrontEndT {
 		builtinDirs:     NewSet[string](),
 		packageMap:      map[string]*PackageT{},
 		FileSet:         token.NewFileSet(),
+		Bindings:        BindingsT{},
+		Funcs:           map[*VariableT]*ast.FuncDecl{},
+		Values:          map[*VariableT]ast.Expr{},
 		TypesInfo: &types.Info{
 			Types:     map[ast.Expr]types.TypeAndValue{},
 			Defs:      map[*ast.Ident]types.Object{},
@@ -233,12 +240,96 @@ func (frontEnd *FrontEndT) typeCheckPackage(pkg *PackageT, conf *types.Config) {
 
 // ----------------------------------------------------------------
 
-func ConvertFuncDecl(decl *ast.FuncDecl, env *envT) *CallNodeT {
-	return CpsFunc(decl.Name.Name,
-		decl.Type,
-		decl.Body,
-		env.typeInfo.Defs[decl.Name].Type(),
-		env)
+func (frontEnd *FrontEndT) ProcessDecls() {
+	for _, pkg := range frontEnd.Packages {
+		for _, astFile := range pkg.AstFiles {
+			for _, decl := range astFile.Decls {
+				frontEnd.processPackageDecl(decl)
+			}
+		}
+	}
+}
+
+func (frontEnd *FrontEndT) processPackageDecl(rawDecl ast.Decl) {
+	switch decl := rawDecl.(type) {
+	case *ast.GenDecl:
+		switch decl.Tok {
+		case token.VAR:
+			frontEnd.processVarDecl(decl)
+		case token.IMPORT, token.CONST:
+			// IMPORT and CONST are handled by Go.
+		default:
+			panic(fmt.Sprintf("have unhandled ast.GenDecl '%v'", decl.Tok))
+		}
+	case *ast.FuncDecl:
+		vart := frontEnd.bindPackageIdent(decl.Name)
+		frontEnd.Funcs[vart] = decl
+	default:
+		panic(fmt.Sprintf("unrecognized top-level declaration %v", decl))
+	}
+}
+
+func (frontEnd *FrontEndT) processVarDecl(decl *ast.GenDecl) {
+	for _, rawSpec := range decl.Specs {
+		spec := rawSpec.(*ast.ValueSpec)
+		for i, name := range spec.Names {
+			vart := frontEnd.bindPackageIdent(name)
+			if spec.Values == nil {
+				frontEnd.Values[vart] = nil
+			} else {
+				frontEnd.Values[vart] = spec.Values[i]
+			}
+		}
+	}
+}
+
+func (frontEnd *FrontEndT) bindPackageIdent(ident *ast.Ident) *VariableT {
+	obj := frontEnd.TypesInfo.ObjectOf(ident)
+	if obj == nil {
+		panic("no type object for identifier '" + ident.Name + "'")
+	}
+	vart := MakeVariable(ident.Name, obj.Type(), ident.Pos())
+	vart.Flags["package"] = true
+	frontEnd.Bindings[obj] = vart
+	return vart
+}
+
+// ----------------------------------------------------------------
+
+func (frontEnd *FrontEndT) ConvertFuncs(
+	entryVar *VariableT,
+	debug bool,
+) ([]*VariableT, []*CallNodeT) {
+	env := MakeEnv(frontEnd.TypesInfo, frontEnd.Bindings)
+	vars := []*VariableT{}
+	vals := []*CallNodeT{}
+	converted := NewSet[*VariableT]()
+	convertFunc := func(vart *VariableT) {
+		funcDecl := frontEnd.Funcs[vart]
+		if converted.Contains(vart) || funcDecl == nil {
+			return
+		}
+		converted.Add(vart)
+		fmt.Printf("converting %s\n", vart)
+		funcType := frontEnd.TypesInfo.Defs[funcDecl.Name].Type()
+		val := CpsFunc(funcDecl.Name.Name, funcDecl.Type, funcDecl.Body, funcType, env)
+		if debug {
+			fmt.Printf("%s CPS ================", vart)
+			PpCps(val)
+		}
+		Push(&vars, vart)
+		Push(&vals, val)
+	}
+	convertFunc(entryVar)
+	// Keep adding functions as they are referenced.
+	for 0 < len(env.newPackageVars) {
+		new := env.newPackageVars
+		env.newPackageVars = nil
+		for _, vart := range new {
+			convertFunc(vart)
+		}
+	}
+	return vars, vals
 }
 
 func SimplifyTopLevel(lambda *CallNodeT) {

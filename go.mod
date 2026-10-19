@@ -1,6 +1,6 @@
 module github.com/s48/transform
 
-go 1.22.2
+go 1.27.1
 
 require golang.org/x/tools v0.27.0
 
