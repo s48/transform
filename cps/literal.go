@@ -49,6 +49,7 @@ func varsForLiterals(call *CallNodeT, vars map[string]*VariableT) {
 			}
 			vart = MakeVariable("v", literal.Type, literal.source)
 			loadCall := MakeCall(LookupPrimop("loadReg"), []*VariableT{vart}, DetachInput(literal))
+			loadCall.SetSource(call.Source())
 			InsertCallParent(call, loadCall)
 			AttachInput(call, i, MakeReferenceNode(vart))
 			vars[value] = vart

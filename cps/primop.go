@@ -415,6 +415,8 @@ func (primop *BinopPrimopT) Simplify(call *CallNodeT) {
 var goOpToken = map[string]token.Token{"+": token.ADD,
 	"-":  token.SUB,
 	"*":  token.MUL,
+	"/":  token.QUO_ASSIGN, // constant.BinaryOp(QUO) gives a rational; QUO_ASSIGN truncates to an integer
+	"%":  token.REM,
 	"&":  token.AND,
 	"|":  token.OR,
 	"^":  token.XOR,

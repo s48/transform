@@ -103,16 +103,13 @@ func Assemble[T any](top *CallNodeT, generator CodeGeneratorT[T]) []*CodeBlockT[
 
 func nextOffsets[T any](block *CodeBlockT[T], useMax bool) []int {
 	call := block.end
+	targets := call.Next
 	if len(call.Next) == 0 {
-		if useMax {
-			return []int{math.MaxInt}
-		} else {
-			return []int{block.next[0].labelBlock().offset}
-		}
+		targets = []*CallNodeT{block.next[0].start}
 	}
-	offsets := make([]int, len(call.Next))
+	offsets := make([]int, len(targets))
 	fallThrough := block.fallThrough
-	for i, next := range call.Next {
+	for i, next := range targets {
 		nextBlock := next.Block.(*CodeBlockT[T]).labelBlock()
 		if nextBlock != fallThrough {
 			if useMax {

@@ -577,10 +577,12 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 		topLambda,
 		continueLambda)
 	calls.BuildFinalCall("jump", 0, topVar)
+	calls.SetLastSource(position)
 	calls.SetLast(breakLambda)
 
 	// continue = (lambda () ... post... (top))
 	post.BuildFinalCall("jump", 0, topVar)
+	calls.SetLastSource(position)
 	AttachNext(continueLambda, post.First)
 
 	//  top = (lambda () (if cond (block ... body ... (continue)) (break)))
@@ -591,6 +593,7 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 	env.breakVars.Pop()
 	env.continueVars.Pop()
 	bodyCalls.BuildFinalCall("jump", 0, continueVar)
+	calls.SetLastSource(position)
 	if cond == nil {
 		AttachNext(topLambda, bodyCalls.First)
 	} else {
@@ -662,6 +665,7 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	post := MakeCalls()
 	keyVal := keyLhs.read(post)
 	keyVal = MakeReferenceNode(post.BuildCall("+", "keyval", keyVal.(*ReferenceNodeT).Variable.Type, keyVal, 1))
+	post.SetLastSource(rangeStmt.Range)
 	keyLhs.write(keyVal, post)
 	post.SetLastSource(rangeStmt.Range)
 	condCalls := MakeCalls()
