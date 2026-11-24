@@ -220,8 +220,9 @@ func writeCallOutputs(node *CallNodeT, writer io.Writer) {
 			fmt.Fprintf(writer, "_")
 		} else {
 			fmt.Fprintf(writer, "%s_%d", variable.Name, variable.Id)
-			if variable.Register != nil {
-				fmt.Fprintf(writer, "(%s)", variable.Register)
+			reg := variable.Register()
+			if reg != nil {
+				fmt.Fprintf(writer, "(%s)", reg)
 			}
 		}
 	}

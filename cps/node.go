@@ -13,6 +13,98 @@ import (
 	"github.com/s48/transform/util"
 )
 
+// The CPS intermediate language has four types of nodes,
+// call nodes and three kinds of inputs nodes.
+//
+// Call nodes represent a call to some primitive operation.  A call
+// node has five main elements:
+//   - type: one of CallExit, JumpLambda, ProcLambda
+//   - primop: the primitive operator being called
+//   - inputs: a slice of nodes that are the arguments
+//             to the primop.
+//   - outputs: these are variables that will be bound
+//              to the results of the call.
+//   - next: zero or more call nodes that represent the
+//           following call to execute.
+// The three types of calls are:
+//   - CallExit: a calls that is a 'next' value for another call
+//   - JumpLambda: a call that represents the target of one
+//      or more jump calls, always an input to a Let or Letrec call.
+//   - ProcLamba: a call that represents a procedure, always
+//      an input to some call, except for the root of the node tree.
+//
+// Most calls have one next call.  Calls with no next call
+// represent either a return from a procedure or a jump to
+// a call bound to a variable.  A call with two (or more,
+// but so far it is only two) next calls is a conditional,
+// These represent conditional jump instructions.
+//
+// There are three types of input nodes:
+//  - Literal nodes: these represent constants such as integers.
+//  - Reference nodes: references to variables.
+//  - Lambda nodes: these are call nodes that represent
+//    procedures and jump targets.  These are only found
+//    as inputs to Let and Letrec primop calls, which
+//    bind them to variables.
+//
+// Nodes and variables are connected in the following ways:
+//  - All nodes (except the root ProcLambda) have a parent call node,
+//  to which they are either an input or a next.  They also have their
+//  index within their parent's inputs, for all nodes except
+//  CallExits, or within their parent's exits, for CallExits.
+//  - Reference nodes have a pointer to the call node for which they
+//  are an output, refererred to as the variable's binder.
+//  - Variables have a slice containing the reference nodes that refer
+//  to them.
+//  - Variables are always in scope, in the follwing sense: going up
+//  parent pointers from a reference node will eventually lead to the
+//  referred-to variable's binder.
+//
+// There are several disinguished primops that are used for
+// control flow:
+//
+//  - Let and Letrec bind variables to values.  Each has the same
+//  number of inputs as outputs and binds the inputs to the outputs.
+//  For Let the inputs cannot contain references to the outputs.  For
+//  Letrec the inputs are always lambda nodes and can refer to
+//  Letrec's outputs.  This allows for recursive calls.
+//
+//  - JumpLambdas are only found as inputs to Let and Letrec and the
+//  variables they are bound to are only found as the first input to a
+//  Jump primop.  The variables act as jump labels: the Jump primop
+//  has no next calls and instead transfers control to the the
+//  JumpLambda.  The other inputs to the JUMP are bound to the inputs
+//  of the JumpLambda (this is equivalent to the Phi functions in
+//  Static Single Assignment).
+//
+//  - ProcLambdas are first-class values and can be passed as
+//  arguments, stored in memory, etc.  A ProcLambda is called using
+//  the ProcCall primop.  Unlike JumpLambdas, it is not always
+//  possible to identify which ProcLambda will be invoked by a
+//  particular ProcCall.
+//
+//  - The first output of a ProcLamba is its continuation variable and
+//  will be bound to the return point of the call, meaning the next
+//  field of the ProcCall where the ProcLambda was called.  Returning
+//  is done by a call to the Return primop, which takes as its first
+//  input a reference to the enclosing ProcLambda's continuation
+//  variable.  Any additional inputs to the Return are bound to the
+//  outputs of the ProcCall.
+//
+//  - Conditionals are primops that have two next calls.  For example,
+//  the IfLt primop has two inputs, no outputs, and two next calls.
+//  If the first input is less then the second then control transfers
+//  to the first next call, otherwise to the second.
+//
+// A basic block begins with a JumpLamba, ProcLamba, or a next call to
+// a conditional (a call with two or more next calls).  The basic block
+// then contains a series of calls with one next call each and ends
+// with a call with no next calls (Jump or Return) or a conditional.
+// The control flow graph can then be constructed by adding edges from
+// Jump calls to the JumpLambdas that they transfer control to.  These
+// are always known because variables bound to JumpLambdas can only be
+// referenced as the first input to a Jump.
+
 // Wart: We need an interface to replace Go's tokens for source data.
 // token.FileSet is not an interface so we can't create our own.
 var TheFileSet *token.FileSet

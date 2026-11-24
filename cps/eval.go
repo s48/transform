@@ -85,7 +85,7 @@ func (env *RegEnvT) Get(vart *VariableT) any {
 	if labelValue != nil {
 		return labelValue
 	}
-	return env.values[vart.Register]
+	return env.values[vart.Register()]
 }
 
 func (env *RegEnvT) Set(vart *VariableT, rawValue any) {
@@ -93,7 +93,7 @@ func (env *RegEnvT) Set(vart *VariableT, rawValue any) {
 	case *CallNodeT:
 		env.labels[vart] = value
 	default:
-		env.values[vart.Register] = value
+		env.values[vart.Register()] = value
 	}
 }
 
