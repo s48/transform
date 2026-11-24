@@ -118,7 +118,7 @@ type RegisterT interface {
 }
 
 type liveRangeT struct {
-	intervals []intervalT // nonoverlapping, sorted by start
+	intervals []intervalT // nonoverlapping, sorted from highest to lowest
 }
 
 type intervalT struct {
@@ -130,12 +130,21 @@ func (live *liveRangeT) clone() *liveRangeT {
 	return &liveRangeT{slices.Clone(live.intervals)}
 }
 
+// Intervals must be nonempty and added from highest to lowest.
 func (live *liveRangeT) add(interval intervalT) {
+	if interval.end <= interval.start {
+		panic(fmt.Sprintf("adding bad interval [%d, %d) to live range",
+			interval.start, interval.end))
+	}
 	intervals := live.intervals
 	if len(intervals) != 0 {
 		last := &intervals[len(intervals)-1]
-		if interval.start == last.end {
-			last.end = interval.end
+		if last.start < interval.end {
+			panic(fmt.Sprintf("adding interval [%d, %d) that is not below [%d, %d)",
+				interval.start, interval.end, last.start, last.end))
+		}
+		if interval.end == last.start {
+			last.start = interval.start
 			return
 		}
 	}
@@ -149,9 +158,9 @@ func (live *liveRangeT) conflicts(other *liveRangeT) bool {
 	j := 0
 	for i < len(x) && j < len(y) {
 		if x[i].end <= y[j].start {
-			i += 1
-		} else if y[j].end <= x[i].start {
 			j += 1
+		} else if y[j].end <= x[i].start {
+			i += 1
 		} else {
 			return true
 		}
@@ -161,9 +170,9 @@ func (live *liveRangeT) conflicts(other *liveRangeT) bool {
 
 func (live *liveRangeT) intervalConflicts(y intervalT) bool {
 	for _, x := range live.intervals {
-		if x.end <= y.start {
+		if y.end <= x.start {
 			continue
-		} else if y.end <= x.start {
+		} else if x.end <= y.start {
 			break
 		} else {
 			return true
@@ -182,7 +191,7 @@ func (live *liveRangeT) union(other *liveRangeT) *liveRangeT {
 	j := 0
 	result := &liveRangeT{}
 	for i < len(x) && j < len(y) {
-		if x[i].start <= y[j].start {
+		if y[j].start <= x[i].start {
 			result.add(x[i])
 			i += 1
 		} else {
