@@ -131,7 +131,8 @@ func (search *searchT) removeShortest() *searchLinkT {
 }
 
 // Extends the search along the shortest leaf.  If that reaches a chain
-// this returns the path and the chain, otherwise it returns nil.
+// this returns the path and the chain.  If it reaches a use in a fixed
+// register then it returns the path and nil.  Otherwise it returns nil.
 func (search *searchT) extend() ([]*linkT, *chainT) {
 	leaf := search.removeShortest()
 	for _, end := range leaf.link.ends {
@@ -148,6 +149,14 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 		}
 		slices.Reverse(path)
 		return path, lower
+	}
+	if leaf.link.fixedUse != nil {
+		path := []*linkT{}
+		for branch := leaf; branch != nil; branch = branch.parent {
+			Push(&path, branch.link)
+		}
+		slices.Reverse(path)
+		return path, nil
 	}
 	search.addLeaves(leaf.link, leaf)
 	return nil, nil
@@ -322,11 +331,12 @@ func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 		if i != 0 {
 			above = nil
 		}
-		lower = alloc.addLinks(above, lower, path[i:i+1])
-		if lower == nil {
+		chain := alloc.addLinks(above, lower, path[i:i+1])
+		if chain == nil {
 			alloc.spill(link)
 			break
 		}
+		lower = chain
 		upper = upper.root()
 	}
 	if upper != nil {
@@ -349,7 +359,7 @@ func (alloc *allocatorT) spill(link *linkT) {
 
 // Add the links to a chain, merged with one or both of 'upper' and 'lower',
 // or with neither.  'upper' is nil if the links do not lead down from a
-// chain.  Returns the chain, or nil if this can't be done.
+// chain and 'lower' is nil if they lead to a fixed register.  Returns the chain, or nil if this can't be done.
 func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) *chainT {
 	live := &liveRangeT{}
 	for _, link := range links {
@@ -360,16 +370,24 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 		live = live.union(&link.liveRange)
 	}
 	choices := [][]*chainT{{upper, lower}, {upper}, {lower}, {}}
-	if upper == nil || upper == lower {
+	if upper == nil && lower == nil {
+		choices = [][]*chainT{{}}
+	} else if lower == nil {
+		choices = [][]*chainT{{upper}, {}}
+	} else if upper == nil || upper == lower {
 		choices = [][]*chainT{{lower}, {}}
+	}
+	class := links[len(links)-1].fixedUse
+	if lower != nil {
+		class = lower.class
 	}
 	if links[0].variable.constant() != nil {
 		// Loading it again is as good as a move from a separate chain.
 		choices = choices[:len(choices)-1]
 	}
 	for _, chains := range choices {
-		if alloc.canMerge(chains, live, lower.class) {
-			chain := alloc.mergePath(chains, links, live, lower.class)
+		if alloc.canMerge(chains, live, class) {
+			chain := alloc.mergePath(chains, links, live, class)
 			// The links below these may have changed.  The lower chain is
 			// unchanged if it was not merged.
 			alloc.startSearch(chain)

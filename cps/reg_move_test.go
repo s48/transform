@@ -42,7 +42,7 @@ func TestMovesRandom(t *testing.T) {
 		checkAllocation(t, alloc)
 		moves := alloc.findMoves(blocks).Moves
 		for _, callMoves := range moves {
-			count += len(callMoves.Before) + len(callMoves.Jump)
+			count += len(callMoves.Before) + len(callMoves.At)
 		}
 		for range 5 {
 			simulate(t, random, blocks[0], moves, 60)
@@ -100,7 +100,7 @@ func TestMovePlacement(t *testing.T) {
 	}
 	for i, test := range tests {
 		callMoves := moves[test.call]
-		if callMoves == nil || len(callMoves.Jump) != 0 ||
+		if callMoves == nil || len(callMoves.At) != 0 ||
 			!slices.Equal(callMoves.Before, []RegMoveT{test.move}) {
 			t.Errorf("wrong moves for test %d", i)
 		}
@@ -154,7 +154,7 @@ func TestSpillAroundLoop(t *testing.T) {
 			if moves == nil {
 				moves = &RegMovesT{}
 			}
-			if len(moves.Jump) != 0 {
+			if len(moves.At) != 0 {
 				t.Errorf("there should be nothing to do at jumps")
 			}
 			expected := []RegMoveT{}
@@ -242,4 +242,63 @@ func TestSpillUp(t *testing.T) {
 	if top.links[0].spilled {
 		t.Errorf("links in chains should not be spilled")
 	}
+}
+
+// Parameter x arrives in a fixed register, is passed to a call, and is
+// used after it along with the call's result.  Both have to be moved out
+// of the fixed registers, and x into one for the call.
+func TestFixedRegisters(t *testing.T) {
+	setTestRegisters(4)
+	vars := testVars("x y")
+	x, y := vars[0], vars[1]
+	block := makeRegBlock()
+	block.addTestCall(nil, EarlyRegUse, []*VariableT{x}, LateRegUse)
+	setTestFixed(block.outputSpecs[0])
+	block.addTestCall([]*VariableT{x}, EarlyRegUse, []*VariableT{y}, LateRegUse)
+	setTestFixed(block.inputSpecs[1])
+	setTestFixed(block.outputSpecs[1])
+	block.addTestCall([]*VariableT{x, y}, EarlyRegUse, nil, LateRegUse)
+	alloc := allocateTestBlocks([]*regBlockT{block})
+	checkAllocation(t, alloc)
+	allocation := alloc.findMoves([]*regBlockT{block})
+	calls := block.calls()
+	fixed := RegLocationT{Register: testFixedRegisters[0]}
+	xRegister := RegLocationT{Register: x.ReferenceRegister(calls[2].Inputs[0])}
+	yRegister := RegLocationT{Register: y.ReferenceRegister(calls[2].Inputs[1])}
+	expected := map[*CallNodeT]RegMovesT{
+		calls[1]: {Before: []RegMoveT{{fixed, xRegister}}, At: []RegMoveT{{xRegister, fixed}}},
+		calls[2]: {Before: []RegMoveT{{fixed, yRegister}}},
+	}
+	for _, call := range calls {
+		moves := allocation.Moves[call]
+		if moves == nil {
+			moves = &RegMovesT{}
+		}
+		if !slices.Equal(moves.Before, expected[call].Before) || !slices.Equal(moves.At, expected[call].At) {
+			t.Errorf("wrong moves %v", *moves)
+		}
+	}
+	if allocation.NumSlots != 0 {
+		t.Errorf("nothing should be spilled")
+	}
+	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+}
+
+// A call's result that is only passed to another call is moved directly,
+// or through a register, without using memory.
+func TestFixedToFixed(t *testing.T) {
+	setTestRegisters(4)
+	vars := testVars("y")
+	block := makeRegBlock()
+	block.addTestCall(nil, EarlyRegUse, vars, LateRegUse)
+	setTestFixed(block.outputSpecs[0])
+	block.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	block.addTestCall(vars, EarlyRegUse, nil, LateRegUse)
+	setTestFixed(block.inputSpecs[2])
+	alloc := allocateTestBlocks([]*regBlockT{block})
+	allocation := alloc.findMoves([]*regBlockT{block})
+	if allocation.NumSlots != 0 {
+		t.Errorf("y should not be in memory")
+	}
+	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
 }

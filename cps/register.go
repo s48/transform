@@ -18,6 +18,10 @@ const (
 type RegUseSpecT struct {
 	PhaseOffset int // -1, 0 for early and late use
 	Class       *RegisterClassT
+	// If non-nil the value has to be in this register, which is not one
+	// that the allocator assigns.  The value is moved there, or from there,
+	// as part of the call.  Used for passing arguments and return values.
+	Fixed RegisterT
 }
 
 // Variable ranges are found bottom up.  If the block ends with a

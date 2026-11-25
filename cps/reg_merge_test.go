@@ -211,7 +211,7 @@ func TestMergeJump(t *testing.T) {
 	}
 	// The other is copied.
 	moves := alloc.findMoves([]*regBlockT{entry, target}).Moves
-	if len(moves) != 1 || len(moves[entry.end].Before) != 0 || len(moves[entry.end].Jump) != 1 {
+	if len(moves) != 1 || len(moves[entry.end].Before) != 0 || len(moves[entry.end].At) != 1 {
 		t.Errorf("wrong moves")
 	}
 }
@@ -308,6 +308,17 @@ func addTestJumps(next [][]int) [][]int {
 	return result
 }
 
+// Registers that the allocator does not assign.
+var testFixedRegisters = []RegisterT{
+	&testRegisterT{number: 100}, &testRegisterT{number: 101}, &testRegisterT{number: 102},
+}
+
+func setTestFixed(specs []*RegUseSpecT) {
+	for i, spec := range specs {
+		specs[i] = &RegUseSpecT{PhaseOffset: spec.PhaseOffset, Class: spec.Class, Fixed: testFixedRegisters[i]}
+	}
+}
+
 // Without 'loops' blocks can only go to later blocks.
 func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*regBlockT {
 	count := 1 + random.Intn(size)
@@ -368,6 +379,10 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 			parameters[i] = newVars(2)
 		}
 		block.addTestCall(nil, EarlyRegUse, parameters[i], LateRegUse)
+		if i == 0 && random.Intn(2) == 0 {
+			// Procedure parameters.
+			setTestFixed(block.outputSpecs[0])
+		}
 		vars.Add(parameters[i]...)
 		pick := func(n int) []*VariableT {
 			members := vars.Members()
@@ -392,6 +407,11 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 				continue
 			}
 			block.addTestCall(pick(random.Intn(3)), -random.Intn(2), outputs, -random.Intn(2))
+			if random.Intn(4) == 0 {
+				// A procedure call.
+				setTestFixed(block.inputSpecs[block.callCount-1])
+				setTestFixed(block.outputSpecs[block.callCount-1])
+			}
 			vars.Add(outputs...)
 		}
 		if len(next[i]) == 1 {
@@ -518,12 +538,25 @@ func simulate(
 			callMoves := moves[call]
 			if callMoves != nil {
 				doMoves(callMoves.Before)
+				doMoves(callMoves.At)
+			}
+			for j, spec := range block.inputSpecs[i] {
+				if spec != nil && spec.Fixed != nil && !isJump {
+					vart := call.Inputs[j].(*ReferenceNodeT).Variable
+					if locations[RegLocationT{Register: spec.Fixed}] != values[vart] {
+						t.Fatalf("%s_%d is not in its fixed register", vart.Name, vart.Id)
+					}
+				}
+			}
+			// Fixed registers are not preserved by the call.
+			for _, register := range testFixedRegisters {
+				delete(locations, RegLocationT{Register: register})
 			}
 			jumpArguments := arguments
 			arguments = []int{}
 			for _, phase := range []int{EarlyRegUse, LateRegUse} {
 				for j, spec := range block.inputSpecs[i] {
-					if spec != nil && spec.PhaseOffset == phase {
+					if spec != nil && spec.PhaseOffset == phase && spec.Fixed == nil {
 						if isJump {
 							// These may not be in registers.
 							vart := call.Inputs[j].(*ReferenceNodeT).Variable
@@ -538,16 +571,16 @@ func simulate(
 						continue
 					} else if len(jumpArguments) != 0 {
 						values[call.Outputs[j]] = jumpArguments[j] // moved by the jump
+					} else if spec.Fixed != nil {
+						locations[RegLocationT{Register: spec.Fixed}] = nextValue
+						values[call.Outputs[j]] = nextValue
+						nextValue += 1
 					} else {
 						write(call.Outputs[j], nextValue)
 						nextValue += 1
 					}
 				}
 			}
-		}
-		lastMoves := moves[block.end]
-		if lastMoves != nil {
-			doMoves(lastMoves.Jump)
 		}
 		if len(block.next) == 0 {
 			return

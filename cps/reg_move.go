@@ -21,18 +21,31 @@ import (
 // What the back end needs to know, other than which registers are used
 // for which variables.
 type RegAllocationT struct {
-	Moves    map[*CallNodeT]*RegMovesT
-	NumSlots int
+	Moves  map[*CallNodeT]*RegMovesT
+	Frames map[*CallNodeT]*RegFrameT // for each procedure
+}
+
+type RegFrameT struct {
+	NumSlots  int         // slots in memory
+	Registers []RegisterT // all registers assigned in the procedure
+}
+
+// The result for a single procedure.
+type procAllocationT struct {
+	Moves     map[*CallNodeT]*RegMovesT
+	NumSlots  int
+	Registers []RegisterT
 }
 
 // The moves that have to happen at a call.  The moves in each slice are
 // done in parallel.
 type RegMovesT struct {
 	Before []RegMoveT // done before the call
-	// For jumps only, these are the jump itself.  They include moving the
-	// arguments to wherever the JumpLambda's outputs are.  They come after
-	// the ones in Before.
-	Jump []RegMoveT
+	// These are part of the call itself, and come after the ones in Before.
+	// For jumps they include moving the arguments to wherever the
+	// JumpLambda's outputs are.  For other calls they move values to fixed
+	// registers.
+	At []RegMoveT
 }
 
 type RegMoveT struct {
@@ -55,15 +68,18 @@ type moveFinderT struct {
 	// Program points where each variable is live.
 	varPoints map[*VariableT]util.SetT[int]
 	slots     map[*VariableT]int // for variables that are in memory
-	moves     map[*CallNodeT]*RegMovesT
+	// Values that are in fixed registers at the point where they are created.
+	fixedOutputs map[int]map[*VariableT]RegisterT
+	moves        map[*CallNodeT]*RegMovesT
 }
 
-func (alloc *allocatorT) findMoves(blocks []*regBlockT) *RegAllocationT {
+func (alloc *allocatorT) findMoves(blocks []*regBlockT) *procAllocationT {
 	finder := &moveFinderT{
-		blocks:     blocks,
-		pointLinks: make([]map[*VariableT]*linkT, alloc.numProgramPoints),
-		varPoints:  map[*VariableT]util.SetT[int]{},
-		moves:      map[*CallNodeT]*RegMovesT{},
+		blocks:       blocks,
+		pointLinks:   make([]map[*VariableT]*linkT, alloc.numProgramPoints),
+		varPoints:    map[*VariableT]util.SetT[int]{},
+		fixedOutputs: map[int]map[*VariableT]RegisterT{},
+		moves:        map[*CallNodeT]*RegMovesT{},
 	}
 	for i := range finder.pointLinks {
 		finder.pointLinks[i] = map[*VariableT]*linkT{}
@@ -83,9 +99,29 @@ func (alloc *allocatorT) findMoves(blocks []*regBlockT) *RegAllocationT {
 	}
 	numSlots := finder.assignSlots(finder.findSlotGroups())
 	for _, block := range blocks {
+		for i, call := range block.calls() {
+			for j, spec := range block.outputSpecs[i] {
+				if spec != nil && spec.Fixed != nil && call.CallType != JumpLambda {
+					point := block.startIndex + 2*i + 1 // where moves out of it start
+					if finder.fixedOutputs[point] == nil {
+						finder.fixedOutputs[point] = map[*VariableT]RegisterT{}
+					}
+					finder.fixedOutputs[point][call.Outputs[j]] = spec.Fixed
+				}
+			}
+		}
+	}
+	for _, block := range blocks {
 		finder.findBlockMoves(block)
 	}
-	return &RegAllocationT{finder.moves, numSlots}
+	registers := []RegisterT{}
+	for _, chain := range alloc.sortedChains() {
+		if !slices.Contains(registers, chain.Register) {
+			Push(&registers, chain.Register)
+		}
+	}
+	slices.SortFunc(registers, func(x, y RegisterT) int { return x.Number() - y.Number() })
+	return &procAllocationT{finder.moves, numSlots, registers}
 }
 
 func (alloc *allocatorT) allLinks() []*linkT {
@@ -101,6 +137,10 @@ func (alloc *allocatorT) allLinks() []*linkT {
 		for _, link := range chain.links {
 			add(link)
 		}
+	}
+	// Some values never get to a chain.
+	for _, link := range alloc.rootLinks {
+		add(link)
 	}
 	for i := 0; i < len(links); i++ {
 		for _, next := range slices.Concat(links[i].starts, links[i].ends) {
@@ -235,7 +275,9 @@ func (finder *moveFinderT) callMoves(call *CallNodeT) *RegMovesT {
 func (finder *moveFinderT) addBefore(call *CallNodeT, moves []RegMoveT) {
 	if len(moves) != 0 {
 		callMoves := finder.callMoves(call)
-		callMoves.Before = append(callMoves.Before, moves...)
+		for _, move := range moves {
+			callMoves.Before = addMove(callMoves.Before, move.From, move.To)
+		}
 	}
 }
 
@@ -260,6 +302,13 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 			finder.addBefore(call, finder.movesBetween(live, point-1, point))
 		}
 		stores := finder.findStores(call, block.outputSpecs[i])
+		for j, spec := range block.inputSpecs[i] {
+			if spec != nil && spec.Fixed != nil {
+				vart := call.Inputs[j].(*ReferenceNodeT).Variable
+				moves := finder.callMoves(call)
+				moves.At = addMove(moves.At, finder.location(vart, point), RegLocationT{Register: spec.Fixed})
+			}
+		}
 		if i != len(calls)-1 {
 			finder.addBefore(calls[i+1], stores)
 		} else {
@@ -276,7 +325,8 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 		if isJump {
 			moves = append(moves, finder.findJumpMoves(block, next)...)
 			if len(moves) != 0 {
-				finder.callMoves(block.end).Jump = moves
+				callMoves := finder.callMoves(block.end)
+				callMoves.At = append(callMoves.At, moves...)
 			}
 		} else {
 			finder.addBefore(next.start, moves)
@@ -298,21 +348,27 @@ func (finder *moveFinderT) movesBetween(vars util.SetT[*VariableT], from int, to
 
 // Stores for the outputs of a call.
 func (finder *moveFinderT) findStores(call *CallNodeT, specs []*RegUseSpecT) []RegMoveT {
-	stores := []RegMoveT{}
+	moves := []RegMoveT{}
 	if call.CallType == JumpLambda {
-		return stores // done by the jump
+		return moves // done by the jump
 	}
 	for i, spec := range specs {
-		if spec != nil {
-			vart := call.Outputs[i]
-			slot, found := finder.slots[vart]
-			if found {
-				register := vart.definition.chain.root().Register
-				stores = addMove(stores, RegLocationT{Register: register}, RegLocationT{Slot: slot})
-			}
+		vart := call.Outputs[i]
+		if spec == nil || vart.definition == nil || vart.constant() != nil {
+			continue
+		}
+		// A value in a fixed register is only there during the call.  It is
+		// moved out by movesBetween().
+		from := RegLocationT{Register: spec.Fixed}
+		if spec.Fixed == nil {
+			from.Register = vart.definition.chain.root().Register
+		}
+		slot, found := finder.slots[vart]
+		if found {
+			moves = addMove(moves, from, RegLocationT{Slot: slot})
 		}
 	}
-	return stores
+	return moves
 }
 
 // The outputs get their values from the arguments.  An output that is in
@@ -341,6 +397,10 @@ func (finder *moveFinderT) findJumpMoves(block *regBlockT, next *regBlockT) []Re
 }
 
 func (finder *moveFinderT) location(vart *VariableT, point int) RegLocationT {
+	fixed := finder.fixedOutputs[point][vart]
+	if fixed != nil {
+		return RegLocationT{Register: fixed}
+	}
 	link := finder.pointLinks[point][vart]
 	if link.chain != nil {
 		return RegLocationT{Register: link.chain.root().Register}
@@ -353,7 +413,7 @@ func (finder *moveFinderT) location(vart *VariableT, point int) RegLocationT {
 }
 
 func addMove(moves []RegMoveT, from RegLocationT, to RegLocationT) []RegMoveT {
-	if from == to {
+	if from == to || slices.Contains(moves, RegMoveT{from, to}) {
 		return moves
 	}
 	return append(moves, RegMoveT{from, to})

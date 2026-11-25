@@ -7,7 +7,8 @@
 // of chains are just the inputs and outputs of each call
 // (ignoring those that do not need to be in registers, and
 // the arguments of jumps and outputs of JumpLambdas, which
-// just pass values along, and the binding of constants).
+// just pass values along, values in fixed registers, and the
+// binding of constants).
 // They can necessarily be assigned registers, as any single
 // call is limited to the architecture's registers.
 // A chain consists of a set of connected links.
@@ -92,6 +93,17 @@
 // link that never ends up in a chain is in memory.  There is no
 // backtracking.  The search priorities are intended to make the
 // link that does not get a register the right one to spill.
+//
+// Some values have to be in particular registers, which are not ones that
+// the allocator assigns, such as those used for passing arguments and
+// returning values.  These values have no anchors.  They are moved to or
+// from their fixed registers as part of the call that uses or creates
+// them.  A link that leads to a use in a fixed register can be the end of
+// a path, as a chain can, and there are searches from links where values
+// are created in fixed registers.
+//
+// Each procedure is allocated separately.  For now procedures cannot have
+// free variables, as there are no lexical environments.
 //
 // Constants are not stored in memory.  They are instead loaded wherever
 // they are needed and are not already in a register, with nothing done
@@ -179,6 +191,9 @@ type linkT struct {
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
 	spilled    bool      // it cannot be in a chain
+	// If non-nil the link ends where its value is moved to a fixed register,
+	// which can be the end of a path just as a chain can.
+	fixedUse   *RegisterClassT
 	searches   []*searchT // searches that may be using this link
 	loopDepth  int       // depth of the innermost loop containing the link
 }
@@ -387,21 +402,53 @@ func AllocateRegisters(
 	classes ...*RegisterClassT,
 ) *RegAllocationT {
 	makeVarsForLiterals()
-	allocator := &allocatorT{
-		allVars: util.NewSet[*VariableT](),
-		allChains: util.NewSet[*chainT](),
-	}
 	PpCps(top)
-	return allocator.allocate(top, classes)
+	result := &RegAllocationT{
+		Moves:  map[*CallNodeT]*RegMovesT{},
+		Frames: map[*CallNodeT]*RegFrameT{},
+	}
+	for _, proc := range FindProcs(top) {
+		allocator := &allocatorT{
+			allVars:   util.NewSet[*VariableT](),
+			allChains: util.NewSet[*chainT](),
+		}
+		allocation := allocator.allocate(proc, classes)
+		maps.Copy(result.Moves, allocation.Moves)
+		result.Frames[proc] = &RegFrameT{allocation.NumSlots, allocation.Registers}
+	}
+	return result
 }
 
+// Returns 'top' and all of the procedures within it, sorted by Id.  These
+// do not include any inside the procedures' JumpLambdas.
+func FindProcs(top *CallNodeT) []*CallNodeT {
+	procs := []*CallNodeT{}
+	var find func(call *CallNodeT)
+	find = func(call *CallNodeT) {
+		if call.CallType == ProcLambda {
+			Push(&procs, call)
+		}
+		for _, input := range call.Inputs {
+			if IsCallNode(input) {
+				find(input.(*CallNodeT))
+			}
+		}
+		for _, next := range call.Next {
+			find(next)
+		}
+	}
+	find(top)
+	slices.SortFunc(procs, func(x, y *CallNodeT) int { return x.Id - y.Id })
+	return procs
+}
+
+// Each procedure is allocated separately.
 func (alloc *allocatorT) allocate(
-	top *CallNodeT,
+	proc *CallNodeT,
 	classes []*RegisterClassT,
-) *RegAllocationT {
-	top.SetFlag(1)
-	FindBasicBlocks[*regBlockT](top, makeRegBlock)
-	blocks := orderBlocks(top.Block.(*regBlockT))
+) *procAllocationT {
+	FindBasicBlocks[*regBlockT](proc, makeRegBlock)
+	blocks := orderBlocks(proc.Block.(*regBlockT))
 	index := 0
 	for _, block := range blocks {
 		block.startIndex = index
@@ -411,6 +458,10 @@ func (alloc *allocatorT) allocate(
 
 	alloc.numProgramPoints = index
 	alloc.makeLinks(blocks)
+	if len(blocks[0].liveIn) != 0 {
+		panic(fmt.Sprintf("procedure %s_%d has free variables, which are not supported yet",
+			proc.Name, proc.Id))
+	}
 
 	// Sort the variables to get deterministic behavior.
 	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
@@ -504,10 +555,12 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			end := lateIndex + 1 // inclusive -> exclusive
 
 			liveLink := block.liveLinks[vart]
-			if vart.constant() == nil {
+			if vart.constant() == nil && spec.Fixed == nil {
 				vart.definition = alloc.addAnchorLink(vart, start, end, spec.Class, liveLink)
 			} else if liveLink != nil {
 				// Not an anchor, as this does not have to be in a register.
+				// The value of a constant can be loaded when needed and a
+				// value in a fixed register is moved out of it.
 				link := block.makeLink(vart)
 				link.liveRange.add(intervalT{start, end})
 				connectBelow(link, end, liveLink)
@@ -517,9 +570,21 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			delete(block.liveLinks, vart)
 		}
 
-		inputs := getInputs(call, block.inputSpecs[callIndex])
+		inputs := getInputs(call, anchoredSpecs(block.inputSpecs[callIndex]))
 		if call.Primop.Name() == "jump" {
 			inputs = nil // these just need to be live at the end of the block
+		}
+		// Values that are moved to fixed registers have no anchors.  They just
+		// need to be live at the call's early point.
+		for i, spec := range block.inputSpecs[callIndex] {
+			if spec != nil && spec.Fixed != nil {
+				vart := call.Inputs[i].(*ReferenceNodeT).Variable
+				if block.liveLinks[vart] == nil {
+					link := block.makeLink(vart)
+					link.fixedUse = spec.Class
+					block.liveLinks[vart] = &liveLinkT{endIndex: lateIndex, link: link}
+				}
+			}
 		}
 		for _, input := range inputs {
 			vart := input.variable
@@ -619,6 +684,18 @@ func findJumpArgs(jump *CallNodeT, specs []*RegUseSpecT) []*VariableT {
 
 func sortedVars(vars iter.Seq[*VariableT]) []*VariableT {
 	return slices.SortedFunc(vars, func(x, y *VariableT) int { return x.Id - y.Id })
+}
+
+// The specs for inputs that get anchors, which are those that are not in
+// fixed registers.
+func anchoredSpecs(specs []*RegUseSpecT) []*RegUseSpecT {
+	result := make([]*RegUseSpecT, len(specs))
+	for i, spec := range specs {
+		if spec != nil && spec.Fixed == nil {
+			result[i] = spec
+		}
+	}
+	return result
 }
 
 // A call may have more than one reference to a variable, so we

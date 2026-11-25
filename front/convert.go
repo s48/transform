@@ -86,9 +86,6 @@ func (env *envT) bindVar(ident *ast.Ident) *VariableT {
 
 func (env *envT) bindCellVar(ident *ast.Ident) *VariableT {
 	vart := env.bindVar(ident)
-	if vart.HasFlag("package") && len(vart.Refs) == 0 && vart.Flags["primop"] == nil {
-		Push(&env.newPackageVars, vart)
-	}
 	vart.Flags["cell"] = true
 	env.addMakeCell(vart)
 	return vart
@@ -848,6 +845,11 @@ func cpsIdent(ident *ast.Ident, isCalled bool, env *envT, calls *CallsT) NodeT {
 		vart = MakeVariable(ident.Name, typeAndValue.Type, ident.Pos())
 		vart.Flags["package"] = true
 		vart.Flags["primop"] = primop
+	}
+	if vart.HasFlag("package") && len(vart.Refs) == 0 && vart.Flags["primop"] == nil {
+		// The first reference to a package variable.  It may be a
+		// function that needs to be converted.
+		Push(&env.newPackageVars, vart)
 	}
 	if vart.HasFlag("package") {
 		// 'var' variables always get "packageRef", 'func' ones do
