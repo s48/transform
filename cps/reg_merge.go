@@ -401,13 +401,17 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 }
 
 // True if the chains, and a path with the given live range, can be merged
-// without keeping the result from being colored.  A neighbor of the
-// result is significant if it will have N or more neighbors itself.  Either
-// of two tests is sufficient:
-//   - Briggs: there are fewer than N significant neighbors.
+// without keeping the result from being colored.  Each chain has its own
+// set of allowed registers, as values that are live across calls cannot
+// be in registers that the calls change.  A chain with fewer neighbors
+// than allowed registers can always be colored.  A neighbor of the result
+// is significant if it will have at least as many neighbors as it has
+// allowed registers.  Either of two tests is sufficient:
+//   - Briggs: the result has fewer significant neighbors than allowed
+//     registers.
 //   - George: every significant neighbor is already a neighbor of one
-//     particular chain.  The result is then no harder to color than that
-//     chain was.
+//     particular chain, which has the same allowed registers as the
+//     result.  The result is then no harder to color than that chain was.
 func (alloc *allocatorT) canMerge(
 	chains []*chainT,
 	live *liveRangeT,
@@ -415,6 +419,10 @@ func (alloc *allocatorT) canMerge(
 ) bool {
 	if len(live.intervals) == 0 && len(chains) == 1 {
 		return true // nothing changes
+	}
+	allowed := alloc.mergedAllowed(chains, live, class)
+	if allowed == 0 {
+		return false
 	}
 	for i, chain := range chains {
 		if chain.liveRange.conflicts(live) {
@@ -438,18 +446,33 @@ func (alloc *allocatorT) canMerge(
 				degree -= 1
 			}
 		}
-		if class.numRegisters() <= degree {
+		if neighbor.allowed.size() <= degree {
 			Push(&significant, neighbor)
 		}
 	}
-	if len(significant) < class.numRegisters() {
+	if len(significant) < allowed.size() {
 		return true
 	}
 	return slices.ContainsFunc(chains, func(chain *chainT) bool {
-		return !slices.ContainsFunc(significant, func(neighbor *chainT) bool {
-			return !chain.conflicts.Contains(neighbor)
-		})
+		return chain.allowed == allowed &&
+			!slices.ContainsFunc(significant, func(neighbor *chainT) bool {
+				return !chain.conflicts.Contains(neighbor)
+			})
 	})
+}
+
+// The registers allowed for the result of merging the chains and a path
+// with the given live range.
+func (alloc *allocatorT) mergedAllowed(
+	chains []*chainT,
+	live *liveRangeT,
+	class *RegisterClassT,
+) registerSetT {
+	allowed := alloc.allowedRegisters(live, class)
+	for _, chain := range chains {
+		allowed &= chain.allowed
+	}
+	return allowed
 }
 
 // Merge the chains and the path into a single chain, which is returned.  If
@@ -461,6 +484,7 @@ func (alloc *allocatorT) mergePath(
 	live *liveRangeT,
 	class *RegisterClassT,
 ) *chainT {
+	allowed := alloc.mergedAllowed(chains, live, class)
 	var chain *chainT
 	unadded := path
 	if len(chains) == 0 {
@@ -484,6 +508,7 @@ func (alloc *allocatorT) mergePath(
 	for _, link := range unadded {
 		chain.addLink(link)
 	}
+	chain.allowed = allowed
 	alloc.addConflicts(chain, live)
 	alloc.removeFromSearches(path)
 	return chain
@@ -491,7 +516,7 @@ func (alloc *allocatorT) mergePath(
 
 //----------------------------------------------------------------
 // The usual graph coloring.  The merging criteria ensure that there
-// is always a chain with too few remaining neighbors to matter.
+// is always a chain with fewer remaining neighbors than allowed registers.
 
 func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 	degrees := map[*chainT]int{}
@@ -499,7 +524,7 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 	for _, chain := range alloc.sortedChains() {
 		if chain.class == class {
 			degrees[chain] = len(chain.conflicts)
-			if len(chain.conflicts) < class.numRegisters() {
+			if len(chain.conflicts) < chain.allowed.size() {
 				Push(&todo, chain)
 			}
 		}
@@ -510,7 +535,7 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 			// This also decrements the degrees of removed chains, which
 			// does no harm as they are already below the limit.
 			degrees[neighbor] -= 1
-			if degrees[neighbor] == class.numRegisters()-1 {
+			if degrees[neighbor] == neighbor.allowed.size()-1 {
 				Push(&todo, neighbor)
 			}
 		}
@@ -519,7 +544,7 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 		panic("chains cannot be colored")
 	}
 	for _, chain := range slices.Backward(todo) {
-		available := class.newRegisterSet()
+		available := chain.allowed
 		for neighbor := range chain.conflicts {
 			if neighbor.Register != nil {
 				available = class.removeRegister(available, neighbor.Register)

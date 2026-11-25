@@ -92,6 +92,11 @@ func checkAllocation(t *testing.T, alloc *allocatorT) {
 				}
 			}
 		}
+		for point, registers := range alloc.clobbers {
+			if points[point] && slices.Contains(registers, chain.Register) {
+				t.Fatalf("chain %d is live across a call that changes %s", chain.id, chain.Register)
+			}
+		}
 		if len(points) != chain.liveRange.size() {
 			t.Fatalf("chain %d has the wrong live range", chain.id)
 		}
@@ -308,6 +313,23 @@ func addTestJumps(next [][]int) [][]int {
 	return result
 }
 
+// A call that changes the fixed registers and the even-numbered ones.
+type testCallPrimopT struct {
+	PrimopT
+}
+
+func (primop testCallPrimopT) Name() string { return "call" }
+
+func (primop testCallPrimopT) ClobberedRegisters(call *CallNodeT) []RegisterT {
+	result := slices.Clone(testFixedRegisters)
+	for i, register := range testClass.registers {
+		if i%2 == 0 {
+			Push(&result, register)
+		}
+	}
+	return result
+}
+
 // Registers that the allocator does not assign.
 var testFixedRegisters = []RegisterT{
 	&testRegisterT{number: 100}, &testRegisterT{number: 101}, &testRegisterT{number: 102},
@@ -411,6 +433,7 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 				// A procedure call.
 				setTestFixed(block.inputSpecs[block.callCount-1])
 				setTestFixed(block.outputSpecs[block.callCount-1])
+				block.end.Primop = testCallPrimopT{}
 			}
 			vars.Add(outputs...)
 		}
@@ -551,6 +574,12 @@ func simulate(
 			// Fixed registers are not preserved by the call.
 			for _, register := range testFixedRegisters {
 				delete(locations, RegLocationT{Register: register})
+			}
+			primop, ok := call.Primop.(ClobbersRegistersT)
+			if ok {
+				for _, register := range primop.ClobberedRegisters(call) {
+					delete(locations, RegLocationT{Register: register})
+				}
 			}
 			jumpArguments := arguments
 			arguments = []int{}

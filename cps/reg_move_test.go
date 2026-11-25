@@ -22,7 +22,9 @@ func TestMovesRandom(t *testing.T) {
 		for _, link := range alloc.allLinks() {
 			// And some are left in memory.
 			if link.chain == nil && random.Intn(4) < seed%5 {
-				alloc.allChains.Add(newChain(link, testClass))
+				chain := newChain(link, testClass)
+				chain.allowed = alloc.allowedRegisters(&link.liveRange, testClass)
+				alloc.allChains.Add(chain)
 			}
 		}
 		alloc.startMerge()
@@ -31,7 +33,7 @@ func TestMovesRandom(t *testing.T) {
 			chains[i], chains[j] = chains[j], chains[i]
 		})
 		for _, chain := range chains {
-			available := testClass.newRegisterSet()
+			available := chain.allowed
 			for other := range chain.conflicts {
 				if other.Register != nil {
 					available = testClass.removeRegister(available, other.Register)

@@ -61,6 +61,17 @@ func (class *RegisterClassT) numRegisters() int {
 // Use masks for register sets, as is traditional.
 type registerSetT uint64
 
+func (set registerSetT) size() int {
+	return bits.OnesCount64(uint64(set))
+}
+
+// Primops whose calls change the values of some registers, other than
+// those for their outputs, implement this.  Values that are live across
+// such a call cannot be in those registers.
+type ClobbersRegistersT interface {
+	ClobberedRegisters(call *CallNodeT) []RegisterT
+}
+
 func (class *RegisterClassT) newRegisterSet(minimumReg ...int) registerSetT {
 	mask := (uint64(1) << len(class.registers)) - 1
 	if len(minimumReg) != 0 {

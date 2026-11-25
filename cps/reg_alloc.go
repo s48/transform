@@ -79,12 +79,13 @@
 // A path can be merged with a set of chains, which may be empty, if
 // none of their live ranges overlap and doing so meets the
 // neighbor-count criteria.  The neighbors of a chain are the chains
-// whose live ranges overlap its own.  If there are N registers then
-// a neighbor is significant if it has N or more neighbors itself, with
-// all of these counted as they will be after the merge.  The result
-// must either have fewer than N significant neighbors (Briggs) or have
-// all of its significant neighbors already be neighbors of one of the
-// chains being merged (George).
+// whose live ranges overlap its own.  A neighbor is significant if it
+// has at least as many neighbors as it has allowed registers, with all of
+// these counted as they will be after the merge.  The result must either
+// have fewer significant neighbors than it has allowed registers (Briggs)
+// or have all of its significant neighbors already be neighbors of one
+// of the chains being merged that has the same allowed registers
+// (George).
 //
 // If a path can't be added as a whole then the links in it are tried
 // individually, from the lower end up.  The first that can't be put in
@@ -104,6 +105,12 @@
 //
 // Each procedure is allocated separately.  For now procedures cannot have
 // free variables, as there are no lexical environments.
+//
+// Calls can change the values in some registers, such as those that a
+// procedure call does not preserve.  Each chain has a set of registers
+// that it is allowed, which excludes any that are changed by calls that
+// the chain is live across.  The merging criteria and the coloring use
+// each chain's number of allowed registers.
 //
 // Constants are not stored in memory.  They are instead loaded wherever
 // they are needed and are not already in a register, with nothing done
@@ -244,6 +251,7 @@ type chainT struct {
 	liveRange *liveRangeT      // All of the links' intervals combined.
 	class     *RegisterClassT
 	conflicts util.SetT[*chainT]
+	allowed   registerSetT // registers that the chain can be assigned
 	search    *searchT         // for links below this, if there are any
 	Register  RegisterT        // what gets assigned to this
 	peer      *chainT
@@ -262,6 +270,7 @@ func newChain(link *linkT, class *RegisterClassT) *chainT {
 		class: class,
 		liveRange: &liveRangeT{},
 		conflicts: util.NewSet[*chainT](),
+		allowed:   class.newRegisterSet(),
 	}
 	chain.addLink(link)
 	return chain
@@ -388,6 +397,9 @@ type allocatorT struct {
 	numProgramPoints int
 
 	allChains util.SetT[*chainT]
+	// Registers whose values are changed at each program point, which is
+	// the late point of each call that changes any.
+	clobbers map[int][]RegisterT
 	// Links with values that don't come from a chain.
 	rootLinks []*linkT
 	// The chains that are live at each program point.
@@ -510,6 +522,7 @@ func orderBlocks(start *regBlockT) []*regBlockT {
 // The blocks must be in the order returned by orderBlocks.
 
 func (alloc *allocatorT) makeLinks(blocks []*regBlockT) {
+	alloc.findClobbers(blocks)
 	findLiveIn(blocks)
 	makeLoopLinks(blocks)
 	for _, block := range slices.Backward(blocks) {
@@ -562,7 +575,11 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				// The value of a constant can be loaded when needed and a
 				// value in a fixed register is moved out of it.
 				link := block.makeLink(vart)
-				link.liveRange.add(intervalT{start, end})
+				// A value in a fixed register is not in a register assigned by
+				// the allocator during the call that creates it.
+				if spec.Fixed == nil {
+					link.liveRange.add(intervalT{start, end})
+				}
 				connectBelow(link, end, liveLink)
 				vart.definition = link
 				Push(&alloc.rootLinks, link)
@@ -750,8 +767,38 @@ func (alloc *allocatorT) addAnchorLink(
 	if liveLink != nil {
 		connectBelow(link, end, liveLink)
 	}
-	alloc.allChains.Add(newChain(link, class))
+	chain := newChain(link, class)
+	chain.allowed = alloc.allowedRegisters(&link.liveRange, class)
+	alloc.allChains.Add(chain)
 	return link
+}
+
+func (alloc *allocatorT) findClobbers(blocks []*regBlockT) {
+	alloc.clobbers = map[int][]RegisterT{}
+	for _, block := range blocks {
+		for i, call := range block.calls() {
+			primop, ok := call.Primop.(ClobbersRegistersT)
+			if ok {
+				alloc.clobbers[block.startIndex+2*i+1] = primop.ClobberedRegisters(call)
+			}
+		}
+	}
+}
+
+// The registers in the class that are not clobbered anywhere in 'live'.
+func (alloc *allocatorT) allowedRegisters(live *liveRangeT, class *RegisterClassT) registerSetT {
+	allowed := class.newRegisterSet()
+	for point, registers := range alloc.clobbers {
+		if live.intervalConflicts(intervalT{point, point + 1}) {
+			for _, register := range registers {
+				_, found := class.registerIndex[register]
+				if found {
+					allowed = class.removeRegister(allowed, register)
+				}
+			}
+		}
+	}
+	return allowed
 }
 
 // Connect a link that ends at 'end' to the one below it.

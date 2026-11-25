@@ -299,6 +299,13 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 					live.Add(vart)
 				}
 			}
+			// Values created in fixed registers have no links where they are
+			// created.
+			for vart := range finder.fixedOutputs[point-1] {
+				if finder.pointLinks[point][vart] != nil {
+					live.Add(vart)
+				}
+			}
 			finder.addBefore(call, finder.movesBetween(live, point-1, point))
 		}
 		stores := finder.findStores(call, block.outputSpecs[i])

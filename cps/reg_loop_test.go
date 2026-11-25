@@ -53,6 +53,7 @@ func TestLoopLinks(t *testing.T) {
 		index += 2
 		block.endIndex = index
 	}
+	setTestRegisters(8)
 	alloc := &allocatorT{
 		allVars:          util.NewSet[*VariableT](),
 		allChains:        util.NewSet[*chainT](),
@@ -116,7 +117,6 @@ func TestLoopLinks(t *testing.T) {
 		t.Errorf("inner header's link has the wrong starts")
 	}
 
-	setTestRegisters(8)
 	alloc.mergeChains()
 	alloc.colorChains(testClass)
 	checkAllocation(t, alloc)
