@@ -400,6 +400,8 @@ type allocatorT struct {
 	// Registers whose values are changed at each program point, which is
 	// the late point of each call that changes any.
 	clobbers map[int][]RegisterT
+	// Links whose values are moved to or from fixed registers.
+	preferences []preferenceT
 	// Links with values that don't come from a chain.
 	rootLinks []*linkT
 	// The chains that are live at each program point.
@@ -579,6 +581,8 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				// the allocator during the call that creates it.
 				if spec.Fixed == nil {
 					link.liveRange.add(intervalT{start, end})
+				} else {
+					alloc.addPreference(block, liveLink.link, spec.Fixed)
 				}
 				connectBelow(link, end, liveLink)
 				vart.definition = link
@@ -601,6 +605,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 					link.fixedUse = spec.Class
 					block.liveLinks[vart] = &liveLinkT{endIndex: lateIndex, link: link}
 				}
+				alloc.addPreference(block, block.liveLinks[vart].link, spec.Fixed)
 			}
 		}
 		for _, input := range inputs {
@@ -799,6 +804,19 @@ func (alloc *allocatorT) allowedRegisters(live *liveRangeT, class *RegisterClass
 		}
 	}
 	return allowed
+}
+
+// The value in the link is moved to or from the register.  It would be
+// better if the link were in that register.  Those in deeper loops take
+// precedence.
+type preferenceT struct {
+	link     *linkT
+	register RegisterT
+	weight   int
+}
+
+func (alloc *allocatorT) addPreference(block *regBlockT, link *linkT, register RegisterT) {
+	Push(&alloc.preferences, preferenceT{link, register, block.loop.depth() + 1})
 }
 
 // Connect a link that ends at 'end' to the one below it.

@@ -543,6 +543,7 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 	if len(todo) != len(degrees) {
 		panic("chains cannot be colored")
 	}
+	preferences := alloc.chainPreferences(class)
 	for _, chain := range slices.Backward(todo) {
 		available := chain.allowed
 		for neighbor := range chain.conflicts {
@@ -550,6 +551,72 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 				available = class.removeRegister(available, neighbor.Register)
 			}
 		}
-		chain.Register = class.firstRegister(available)
+		chain.Register = chooseRegister(chain, available, preferences)
 	}
+}
+
+// For each chain, the weight of each register that it would prefer.  The
+// weights for links in the same chain and register are added together.
+func (alloc *allocatorT) chainPreferences(class *RegisterClassT) map[*chainT]map[RegisterT]int {
+	result := map[*chainT]map[RegisterT]int{}
+	for _, preference := range alloc.preferences {
+		chain := preference.link.chain.root()
+		_, inClass := class.registerIndex[preference.register]
+		if chain == nil || chain.class != class || !inClass {
+			continue
+		}
+		if result[chain] == nil {
+			result[chain] = map[RegisterT]int{}
+		}
+		result[chain][preference.register] += preference.weight
+	}
+	return result
+}
+
+// Choose one of the available registers for the chain.  It gets the one it
+// prefers most, unless some neighbor that has not yet been assigned a
+// register prefers it more.  Otherwise it gets the first one that no such
+// neighbor prefers, if there is one.
+func chooseRegister(
+	chain *chainT,
+	available registerSetT,
+	preferences map[*chainT]map[RegisterT]int,
+) RegisterT {
+	class := chain.class
+	// The most any unassigned neighbor wants each register.
+	wanted := map[RegisterT]int{}
+	for neighbor := range chain.conflicts {
+		if neighbor.Register == nil {
+			for register, weight := range preferences[neighbor] {
+				wanted[register] = max(wanted[register], weight)
+			}
+		}
+	}
+	var best RegisterT
+	bestWeight := 0
+	for register, weight := range preferences[chain] {
+		index, found := class.registerIndex[register]
+		if !found || (uint64(available)>>index)&1 == 0 || weight < wanted[register] {
+			continue
+		}
+		// Ties go to the lowest-numbered register, for determinism.
+		if bestWeight < weight || (weight == bestWeight && index < class.registerIndex[best]) {
+			best = register
+			bestWeight = weight
+		}
+	}
+	if best != nil {
+		return best
+	}
+	unwanted := available
+	for register := range wanted {
+		_, found := class.registerIndex[register]
+		if found {
+			unwanted = class.removeRegister(unwanted, register)
+		}
+	}
+	if unwanted != 0 {
+		return class.firstRegister(unwanted)
+	}
+	return class.firstRegister(available)
 }

@@ -309,12 +309,16 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 			finder.addBefore(call, finder.movesBetween(live, point-1, point))
 		}
 		stores := finder.findStores(call, block.outputSpecs[i])
+		fixedMoves := []RegMoveT{}
 		for j, spec := range block.inputSpecs[i] {
 			if spec != nil && spec.Fixed != nil {
 				vart := call.Inputs[j].(*ReferenceNodeT).Variable
-				moves := finder.callMoves(call)
-				moves.At = addMove(moves.At, finder.location(vart, point), RegLocationT{Register: spec.Fixed})
+				fixedMoves = addMove(fixedMoves, finder.location(vart, point), RegLocationT{Register: spec.Fixed})
 			}
+		}
+		if len(fixedMoves) != 0 {
+			moves := finder.callMoves(call)
+			moves.At = append(moves.At, fixedMoves...)
 		}
 		if i != len(calls)-1 {
 			finder.addBefore(calls[i+1], stores)

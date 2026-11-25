@@ -323,7 +323,7 @@ func (primop testCallPrimopT) Name() string { return "call" }
 func (primop testCallPrimopT) ClobberedRegisters(call *CallNodeT) []RegisterT {
 	result := slices.Clone(testFixedRegisters)
 	for i, register := range testClass.registers {
-		if i%2 == 0 {
+		if i%2 == 0 && !slices.Contains(result, register) {
 			Push(&result, register)
 		}
 	}
@@ -331,8 +331,19 @@ func (primop testCallPrimopT) ClobberedRegisters(call *CallNodeT) []RegisterT {
 }
 
 // Registers that the allocator does not assign.
-var testFixedRegisters = []RegisterT{
+var unallocatedTestRegisters = []RegisterT{
 	&testRegisterT{number: 100}, &testRegisterT{number: 101}, &testRegisterT{number: 102},
+}
+
+// The registers used as fixed registers in tests.  These are either ones
+// the allocator does not assign or, as on most machines, ones it does.
+var testFixedRegisters = unallocatedTestRegisters
+
+func useAllocatedFixed(allocated bool) {
+	testFixedRegisters = unallocatedTestRegisters
+	if allocated {
+		testFixedRegisters = testClass.registers[len(testClass.registers)-3:]
+	}
 }
 
 func setTestFixed(specs []*RegUseSpecT) {
@@ -571,10 +582,6 @@ func simulate(
 					}
 				}
 			}
-			// Fixed registers are not preserved by the call.
-			for _, register := range testFixedRegisters {
-				delete(locations, RegLocationT{Register: register})
-			}
 			primop, ok := call.Primop.(ClobbersRegistersT)
 			if ok {
 				for _, register := range primop.ClobberedRegisters(call) {
@@ -644,6 +651,7 @@ func TestMergeRandom(t *testing.T) {
 	for seed := range 4000 {
 		registers := 3 + seed%6
 		setTestRegisters(registers)
+		useAllocatedFixed(seed%3 == 1)
 		random := rand.New(rand.NewSource(int64(seed)))
 		loops := seed%4 != 0
 		blocks := orderBlocks(randomTestBlocks(random, 12, registers-1, loops)[0])
@@ -669,6 +677,7 @@ func TestMergeRandom(t *testing.T) {
 			simulate(t, random, blocks[0], allocation.Moves, 60)
 		}
 	}
+	useAllocatedFixed(false)
 	t.Logf("%v", results)
 }
 

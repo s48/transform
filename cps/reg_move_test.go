@@ -304,3 +304,100 @@ func TestFixedToFixed(t *testing.T) {
 	}
 	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
 }
+
+// With fixed registers that can be allocated, values passed to and from
+// a call are put in them, so there are no moves.
+func TestFixedPreference(t *testing.T) {
+	setTestRegisters(6)
+	useAllocatedFixed(true)
+	defer useAllocatedFixed(false)
+	vars := testVars("x y z")
+	x, y, z := vars[0], vars[1], vars[2]
+	block := makeRegBlock()
+	block.addTestCall(nil, EarlyRegUse, []*VariableT{x, y}, LateRegUse)
+	block.addTestCall([]*VariableT{y, x}, EarlyRegUse, []*VariableT{z}, LateRegUse)
+	setTestFixed(block.inputSpecs[1])
+	setTestFixed(block.outputSpecs[1])
+	block.end.Primop = testCallPrimopT{}
+	block.addTestCall([]*VariableT{z}, EarlyRegUse, nil, LateRegUse)
+	alloc := allocateTestBlocks([]*regBlockT{block})
+	checkAllocation(t, alloc)
+	allocation := alloc.findMoves([]*regBlockT{block})
+	if len(allocation.Moves) != 0 {
+		for call, moves := range allocation.Moves {
+			t.Errorf("unexpected moves at %v: %v", call, *moves)
+		}
+	}
+	if x.Register() != testFixedRegisters[1] || y.Register() != testFixedRegisters[0] ||
+		z.ReferenceRegister(block.end.Inputs[0]) != testFixedRegisters[0] {
+		t.Errorf("values are not in their fixed registers")
+	}
+	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+}
+
+// Two conflicting chains want the same register.  The one that wants it
+// more gets it, even if it is not assigned first.
+func TestPreferencePrecedence(t *testing.T) {
+	setTestRegisters(4)
+	r1 := testClass.registers[1]
+	for _, weights := range [][2]int{{1, 2}, {2, 1}} {
+		a := newChain(&linkT{}, testClass)
+		b := newChain(&linkT{}, testClass)
+		a.conflicts.Add(b)
+		b.conflicts.Add(a)
+		preferences := map[*chainT]map[RegisterT]int{
+			a: {r1: weights[0]},
+			b: {r1: weights[1]},
+		}
+		all := testClass.newRegisterSet()
+		a.Register = chooseRegister(a, all, preferences)
+		b.Register = chooseRegister(b, testClass.removeRegister(all, a.Register), preferences)
+		winner := a
+		if weights[0] < weights[1] {
+			winner = b
+		}
+		if winner.Register != r1 || a.Register == b.Register {
+			t.Errorf("weights %v: a got %s and b got %s", weights, a.Register, b.Register)
+		}
+	}
+}
+
+// r is live throughout a loop and passed in a fixed register after it.
+// t is created in the loop and passed in the same register there.  The
+// two conflict, and t gets the register because it is in the loop.
+func TestPreferenceLoopDepth(t *testing.T) {
+	for _, order := range []string{"r t", "t r"} {
+		setTestRegisters(4)
+		useAllocatedFixed(true)
+		vars := testVars(order)
+		r, tv := vars[0], vars[1]
+		if order == "t r" {
+			r, tv = vars[1], vars[0]
+		}
+		entry := makeRegBlock()
+		entry.addTestCall(nil, EarlyRegUse, []*VariableT{r}, LateRegUse)
+		entry.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+		loop := makeRegBlock()
+		loop.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+		loop.addTestCall(nil, EarlyRegUse, []*VariableT{tv}, LateRegUse)
+		loop.addTestCall([]*VariableT{tv}, EarlyRegUse, nil, LateRegUse)
+		setTestFixed(loop.inputSpecs[2])
+		back := makeRegBlock()
+		back.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+		exit := makeRegBlock()
+		exit.addTestCall([]*VariableT{r}, EarlyRegUse, nil, LateRegUse)
+		setTestFixed(exit.inputSpecs[0])
+		entry.makeTestJump(loop)
+		back.makeTestJump(loop)
+		loop.addNext(back)
+		loop.addNext(exit)
+		blocks := orderBlocks(entry)
+		alloc := allocateTestBlocks(blocks)
+		checkAllocation(t, alloc)
+		fixed := testFixedRegisters[0]
+		if tv.Register() != fixed || r.Register() == fixed {
+			t.Errorf("%s: t is in %s and r in %s", order, tv.Register(), r.Register())
+		}
+		useAllocatedFixed(false)
+	}
+}
