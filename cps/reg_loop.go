@@ -80,46 +80,78 @@ func (block *regBlockT) walkVars(reference func(*VariableT), bind func(*Variable
 	}
 }
 
-// Variables live at the end of the block.
+// Variables live at the end of the block, including any jump arguments
+// whose values are used.
 func (block *regBlockT) liveOut() util.SetT[*VariableT] {
 	result := util.NewSet[*VariableT]()
 	for _, next := range block.next {
 		result.AddSet(next.liveIn)
 	}
+	for i, argument := range block.jumpArgs {
+		target := block.next[0]
+		if argument != nil && target.liveOutputs.Contains(target.start.Outputs[i]) {
+			result.Add(argument)
+		}
+	}
 	return result
 }
 
-// Sets the liveIn field of each block.
+// Sets the liveIn and liveOutputs fields of each block.  A JumpLambda's
+// output may only be used as an argument to a jump, possibly one that goes
+// back to the same JumpLambda.  It, and the arguments passed to it, are
+// live only if there is eventually some other use.
+
 func findLiveIn(blocks []*regBlockT) {
 	bound := map[*regBlockT]util.SetT[*VariableT]{}
+	// Add a variable that is live within the block before it is bound.
+	addLive := func(block *regBlockT, vart *VariableT) bool {
+		live := block.liveIn
+		if bound[block].Contains(vart) {
+			if !block.isOutput(vart) {
+				return false
+			}
+			live = block.liveOutputs
+		}
+		if live.Contains(vart) {
+			return false
+		}
+		live.Add(vart)
+		return true
+	}
 	for _, block := range blocks {
 		block.liveIn = util.NewSet[*VariableT]()
+		block.liveOutputs = util.NewSet[*VariableT]()
 		bound[block] = util.NewSet[*VariableT]()
-		block.walkVars(
-			func(vart *VariableT) {
-				if !bound[block].Contains(vart) {
-					block.liveIn.Add(vart)
+		for i, call := range block.calls() {
+			if call.Primop.Name() != "jump" {
+				for _, input := range getInputs(call, block.inputSpecs[i]) {
+					addLive(block, input.variable)
 				}
-			},
-			func(vart *VariableT) { bound[block].Add(vart) })
+			}
+			for j, spec := range block.outputSpecs[i] {
+				if spec != nil {
+					bound[block].Add(call.Outputs[j])
+				}
+			}
+		}
 	}
 	// Going backwards only repeats if there are loops.
 	for changed := true; changed; {
 		changed = false
 		for _, block := range slices.Backward(blocks) {
-			size := len(block.liveIn)
-			for _, next := range block.next {
-				for vart := range next.liveIn {
-					if !bound[block].Contains(vart) {
-						block.liveIn.Add(vart)
-					}
+			for vart := range block.liveOut() {
+				if addLive(block, vart) {
+					changed = true
 				}
-			}
-			if len(block.liveIn) != size {
-				changed = true
 			}
 		}
 	}
+}
+
+// True if this is an output of the JumpLambda that starts the block.
+func (block *regBlockT) isOutput(vart *VariableT) bool {
+	return block.start.CallType == JumpLambda &&
+		slices.Contains(block.start.Outputs, vart)
 }
 
 // Finds the loops and makes the links for variables that are live in a

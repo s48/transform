@@ -7,7 +7,6 @@
 package cps
 
 import (
-	"fmt"
 	"maps"
 	"slices"
 
@@ -20,30 +19,36 @@ import (
 // the first was added.  Each chain with such links below it has a search.
 // Every link has some chain above it, so this reaches all of them.
 //
+// Constants come after everything else, as they never need to be spilled.
 // Links inside loops come before those outside, so that inner loops are
-// done before outer ones.  Within a loop, links from jump arguments to
-// outputs come after all others.  They have no length, so otherwise they
-// would come first, and merging an argument that is live after the jump
-// with the output keeps the argument from being merged with the rest of
-// its own variable.
+// done before outer ones.  Within a loop, paths that go through a jump from
+// an argument to an output come after those that stay within one variable.
+// Otherwise an argument that is live after the jump may be merged with the
+// output, which keeps it from being merged with the rest of its own
+// variable.
 
 type searchT struct {
 	id        int
-	chain     *chainT
+	chain     *chainT // nil if this starts from a link
+	root      *linkT  // the link, if there is no chain
 	leaves    []*searchLinkT
 	seen      util.SetT[*linkT] // every link that is or has been a leaf
 	cancelled bool              // may still be in the queue
 }
 
 type searchLinkT struct {
-	link   *linkT
-	parent *searchLinkT // nil if the link is next to the chain
-	depth  int          // program points in this and all its parents
-	jump   bool         // this connects a jump's argument and output
-	loop   int          // minimum loop depth of this and all its parents
+	constant bool // the path here has a constant's link
+	link     *linkT
+	parent   *searchLinkT // nil if the link is next to the chain
+	depth    int          // program points in this and all its parents
+	jump     bool         // the path here goes from an argument to an output
+	loop     int          // minimum loop depth of this and all its parents
 }
 
 func (x *searchLinkT) isShorter(y *searchLinkT) bool {
+	if x.constant != y.constant {
+		return y.constant
+	}
 	if x.loop != y.loop {
 		return y.loop < x.loop // inner loops go first
 	}
@@ -64,24 +69,42 @@ func nextSearchId() int {
 func (search *searchT) restart() {
 	search.leaves = nil
 	search.seen = util.NewSet[*linkT]()
+	if search.chain == nil {
+		search.addLeaf(search.root, nil, false)
+		return
+	}
 	for _, link := range search.chain.links {
-		search.addLeaves(link.ends, nil)
+		search.addLeaves(link, nil)
 	}
 }
 
-func (search *searchT) addLeaves(links []*linkT, parent *searchLinkT) {
-	for _, link := range links {
-		if link.chain != nil || search.seen.Contains(link) {
-			continue
-		}
-		search.seen.Add(link)
-		leaf := &searchLinkT{link, parent, link.liveRange.size(), isJumpLink(link), link.loopDepth}
-		if parent != nil {
-			leaf.loop = min(leaf.loop, parent.loop)
-			leaf.depth += parent.depth
-		}
-		Push(&search.leaves, leaf)
+// Add the links that 'from' leads to.
+func (search *searchT) addLeaves(from *linkT, parent *searchLinkT) {
+	for _, link := range from.ends {
+		search.addLeaf(link, parent, from.variable != link.variable)
 	}
+}
+
+func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
+	if link.chain != nil || link.spilled || search.seen.Contains(link) {
+		return
+	}
+	search.seen.Add(link)
+	leaf := &searchLinkT{
+		link:     link,
+		parent:   parent,
+		constant: link.variable.constant() != nil,
+		depth:    link.liveRange.size(),
+		jump:     jump,
+		loop:     link.loopDepth,
+	}
+	if parent != nil {
+		leaf.constant = leaf.constant || parent.constant
+		leaf.depth += parent.depth
+		leaf.jump = leaf.jump || parent.jump
+		leaf.loop = min(leaf.loop, parent.loop)
+	}
+	Push(&search.leaves, leaf)
 }
 
 // The index of the leaf to extend next.
@@ -103,8 +126,8 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 	search.leaves = slices.Delete(search.leaves, i, i+1)
 	path := []*linkT{}
 	for branch := leaf; branch != nil; branch = branch.parent {
-		if branch.link.chain != nil {
-			// Some other path has been using our links.
+		if branch.link.chain != nil || branch.link.spilled {
+			// Some other search has been using our links.
 			search.restart()
 			return nil, nil
 		}
@@ -112,12 +135,12 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 	}
 	for _, end := range leaf.link.ends {
 		lower := end.chain.root()
-		if lower != nil && lower.class == search.chain.class {
+		if lower != nil && (search.chain == nil || lower.class == search.chain.class) {
 			slices.Reverse(path)
 			return path, lower
 		}
 	}
-	search.addLeaves(leaf.link.ends, leaf)
+	search.addLeaves(leaf.link, leaf)
 	return nil, nil
 }
 
@@ -147,6 +170,9 @@ func (alloc *allocatorT) startMerge() {
 	for _, chain := range chains {
 		alloc.startSearch(chain)
 	}
+	for _, link := range alloc.rootLinks {
+		alloc.startRootSearch(link)
+	}
 }
 
 func (alloc *allocatorT) mergeChains() {
@@ -159,11 +185,14 @@ func (alloc *allocatorT) mergeChains() {
 		path, lower := search.extend()
 		if path != nil {
 			alloc.addPath(search.chain, lower, path)
+			if search.chain == nil {
+				// Does nothing if the link is now in a chain.
+				alloc.startRootSearch(search.root)
+			}
 		} else if len(search.leaves) != 0 {
 			alloc.searchQueue.Enqueue(search)
 		}
 	}
-	alloc.checkAllInChains()
 }
 
 func (alloc *allocatorT) sortedChains() []*chainT {
@@ -220,6 +249,15 @@ func (alloc *allocatorT) startSearch(chain *chainT) {
 	}
 }
 
+// Start a search down from, and including, a link.
+func (alloc *allocatorT) startRootSearch(link *linkT) {
+	search := &searchT{id: nextSearchId(), root: link}
+	search.restart()
+	if len(search.leaves) != 0 {
+		alloc.searchQueue.Enqueue(search)
+	}
+}
+
 func (chain *chainT) cancelSearch() {
 	if chain.search != nil {
 		chain.search.cancelled = true
@@ -228,46 +266,60 @@ func (chain *chainT) cancelSearch() {
 }
 
 // Add the path to a chain.  We merge it with as many of the chains it
-// connects as possible.  If it cannot be added as a whole we try adding
-// the links individually, at the cost of some moves.
+// connects as possible.  If it cannot be added as a whole we go up from
+// the lower chain, adding links individually, at the cost of some moves.
+// If we get to one that can't be added then it is spilled.  Any links
+// above that are left for other paths.  If there aren't any then there is
+// no reason for them to be in registers.
 func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 	if alloc.addLinks(upper, lower, path) != nil {
 		return
 	}
-	for i := range path {
-		next := lower
-		if i != len(path)-1 {
-			next = nil
+	for i, link := range slices.Backward(path) {
+		above := upper
+		if i != 0 {
+			above = nil
 		}
-		upper = alloc.addLinks(upper, next, path[i:i+1])
-		if upper == nil {
-			panic(fmt.Sprintf("no register available for variable %s, spilling is not implemented",
-				path[i].variable))
+		lower = alloc.addLinks(above, lower, path[i:i+1])
+		if lower == nil {
+			link.spilled = true
+			break
 		}
-		lower = lower.root()
+		upper = upper.root()
+	}
+	if upper != nil {
+		alloc.startSearch(upper)
 	}
 }
 
 // Add the links to a chain, merged with one or both of 'upper' and 'lower',
-// or with neither.  'lower' is nil if the links do not lead to a chain.
-// Returns the chain, or nil if this can't be done.
+// or with neither.  'upper' is nil if the links do not lead down from a
+// chain.  Returns the chain, or nil if this can't be done.
 func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) *chainT {
 	live := &liveRangeT{}
 	for _, link := range links {
+		if live.conflicts(&link.liveRange) {
+			// The path goes around a loop, with a different variable each time.
+			return nil
+		}
 		live = live.union(&link.liveRange)
 	}
 	choices := [][]*chainT{{upper, lower}, {upper}, {lower}, {}}
-	if upper == lower || lower == nil {
-		choices = [][]*chainT{{upper}, {}}
+	if upper == nil || upper == lower {
+		choices = [][]*chainT{{lower}, {}}
+	}
+	if links[0].variable.constant() != nil {
+		// Loading it again is as good as a move from a separate chain.
+		choices = choices[:len(choices)-1]
 	}
 	for _, chains := range choices {
-		if alloc.canMerge(chains, live, upper.class) {
-			chain := alloc.mergePath(chains, links, live, upper.class)
+		if alloc.canMerge(chains, live, lower.class) {
+			chain := alloc.mergePath(chains, links, live, lower.class)
 			// The links below these may have changed.  The lower chain is
 			// unchanged if it was not merged.
-			alloc.startSearch(upper.root())
-			if chain != upper.root() {
-				alloc.startSearch(chain)
+			alloc.startSearch(chain)
+			if upper != nil && chain != upper.root() {
+				alloc.startSearch(upper.root())
 			}
 			return chain
 		}
@@ -359,19 +411,6 @@ func (alloc *allocatorT) mergePath(
 	return chain
 }
 
-func (alloc *allocatorT) checkAllInChains() {
-	for _, chain := range alloc.sortedChains() {
-		for _, link := range chain.links {
-			for _, next := range slices.Concat(link.starts, link.ends) {
-				if next.chain == nil {
-					panic(fmt.Sprintf("link %d for variable %s is not in a chain",
-						next.id, next.variable))
-				}
-			}
-		}
-	}
-}
-
 //----------------------------------------------------------------
 // The usual graph coloring.  The merging criteria ensure that there
 // is always a chain with too few remaining neighbors to matter.
@@ -410,9 +449,4 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 		}
 		chain.Register = class.firstRegister(available)
 	}
-}
-
-// Links between a jump's arguments and the JumpLambda's outputs.
-func isJumpLink(link *linkT) bool {
-	return len(link.ends) != 0 && link.ends[0].variable != link.variable
 }

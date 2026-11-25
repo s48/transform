@@ -91,6 +91,15 @@ func (block *regBlockT) addTestCall(
 	block.endIndex = block.startIndex + 2*block.callCount
 }
 
+func (block *regBlockT) addTestConstant(vart *VariableT) *CallNodeT {
+	block.addTestCall(nil, EarlyRegUse, []*VariableT{vart}, LateRegUse)
+	call := block.end
+	call.Primop = testPrimopT{name: "loadReg"}
+	call.Inputs = []NodeT{&LiteralNodeT{}}
+	vart.Binder = call
+	return call
+}
+
 // The program points of all links of a variable, which must not overlap.
 func variablePoints(t *testing.T, vart *VariableT) []intervalT {
 	t.Helper()
@@ -286,29 +295,22 @@ func (block *regBlockT) makeTestJump(target *regBlockT) {
 	block.end.Inputs = append([]NodeT{target.start}, block.end.Inputs...)
 	specs := &block.inputSpecs[block.callCount-1]
 	*specs = append([]*RegUseSpecT{nil}, *specs...)
-	block.jumpLinks = make([]*linkT, len(*specs)-1)
+	block.jumpArgs = findJumpArgs(block.end, *specs)
+	target.start.CallType = JumpLambda
 	block.addNext(target)
 }
 
-// Check that the variables' jump argument links are connected to 'output'.
-func expectJumpStarts(t *testing.T, output *VariableT, arguments ...*linkT) {
+// Check that the links for the arguments are connected to the one for 'output'.
+func expectJumpStarts(t *testing.T, block *regBlockT, output *VariableT, arguments ...*linkT) {
 	t.Helper()
-	starts := []*linkT{}
-	for _, connect := range output.definition.starts {
-		if connect.chain != nil || len(connect.liveRange.intervals) != 0 ||
-			len(connect.starts) != 1 || len(connect.ends) != 1 ||
-			connect.ends[0] != output.definition {
-			t.Errorf("bad connecting link for %s", output.Name)
-			continue
-		}
-		argument := connect.starts[0]
-		if connect.variable != argument.variable || !slices.Contains(argument.ends, connect) {
+	link := block.liveLinks[output].link
+	if !slices.Equal(link.starts, arguments) {
+		t.Errorf("wrong arguments for %s", output.Name)
+	}
+	for _, argument := range arguments {
+		if !slices.Contains(argument.ends, link) {
 			t.Errorf("bad argument link for %s", output.Name)
 		}
-		starts = append(starts, argument)
-	}
-	if !slices.Equal(starts, arguments) {
-		t.Errorf("wrong arguments for %s", output.Name)
 	}
 }
 
@@ -331,8 +333,6 @@ func TestConnectJump(t *testing.T) {
 	back := makeRegBlock()
 	back.startIndex = loop.endIndex
 	back.addTestCall([]*VariableT{q, p, p}, EarlyRegUse, nil, LateRegUse) // 8, 9
-	// The last argument is not in a register.
-	back.inputSpecs[0][2] = nil
 	exit := makeRegBlock()
 	exit.startIndex = back.endIndex
 	exit.addTestCall([]*VariableT{q}, EarlyRegUse, nil, LateRegUse) // 10, 11
@@ -352,13 +352,15 @@ func TestConnectJump(t *testing.T) {
 	}
 	alloc.makeLinks(blocks)
 
-	aLink := a.uses[entry.end.Inputs[1]]
-	pLink := p.uses[back.end.Inputs[2]]
-	qLink := q.uses[back.end.Inputs[1]]
-	expectJumpStarts(t, p, aLink, qLink)
-	expectJumpStarts(t, q, aLink, pLink)
-	expectJumpStarts(t, unused, aLink)
-	if len(exit.start.Inputs) != 1 || len(q.uses[exit.start.Inputs[0]].ends) != 0 {
+	expectJumpStarts(t, loop, p, entry.endLinks[a], back.endLinks[q])
+	expectJumpStarts(t, loop, q, entry.endLinks[a], back.endLinks[p])
+	if loop.liveLinks[unused] != nil || p.definition != nil {
+		t.Errorf("JumpLambda outputs should not be defined")
+	}
+	if len(entry.endLinks[a].ends) != 2 || len(back.endLinks) != 2 {
+		t.Errorf("wrong links at jumps")
+	}
+	if len(q.uses[exit.start.Inputs[0]].ends) != 0 {
 		t.Errorf("exit use should have no ends")
 	}
 }

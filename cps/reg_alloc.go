@@ -5,7 +5,9 @@
 //
 // Registers will be assigned to 'chains'.  The initial set
 // of chains are just the inputs and outputs of each call
-// (ignoring those that do not need to be in registers).
+// (ignoring those that do not need to be in registers, and
+// the arguments of jumps and outputs of JumpLambdas, which
+// just pass values along, and the binding of constants).
 // They can necessarily be assigned registers, as any single
 // call is limited to the architecture's registers.
 // A chain consists of a set of connected links.
@@ -35,11 +37,12 @@
 // has at most one link.  The exception is a variable that is live in a
 // loop but not referenced in it.  It has a single link that covers the
 // entire loop, or the outermost such loop if there are several, which
-// is considered to be outside the loop.  Jump arguments are connected to the outputs
-// of the JumpLambda by links that contain no program points.  When
-// all links have been added you can follow the links from a variable's
-// definition to all of its references.  The combined live ranges of
-// those links are the variable's live range.
+// is considered to be outside the loop.  At a jump the links of the
+// arguments are connected to those of the JumpLambda's outputs.  Links
+// and chains are for values, and the same value may be bound to
+// different variables.  When all links have been added you can follow
+// the links from where a value is created to all of the places that it
+// is used.
 //
 // The next step is to merge chains using the links between them
 // in such a way that the normal coloring algorithm will be able to
@@ -51,12 +54,13 @@
 // is only added to a tree once, so the number of paths does not
 // matter.  Searches are ordered by the depth of their shallowest leaf,
 // in units of program points, with shallower ones having priority over
-// deeper ones.  Links in inner loops come before those in outer ones, as
-// good allocation is more important there.  Within a loop, links from
-// jump arguments to outputs come after all others.  They have no length
-// and would otherwise come first, which can keep an argument that is
-// live after the jump from being merged with the rest of its own
-// variable.
+// deeper ones.  Constants come after everything else, as they never need
+// to be spilled.  Links in inner loops come before those in outer ones, as
+// good allocation is more important there.  Within a loop, paths that go
+// through a jump from an argument to an output come after those that
+// stay within one variable.  Otherwise an argument that is live after the
+// jump may be merged with the output, which keeps it from being merged
+// with the rest of its own variable.
 //
 // The algorithm progresses by removing the first search and extending
 // it along its shallowest leaf.  If this reaches a chain, possibly the
@@ -67,7 +71,9 @@
 // any chain that was merged into another is cancelled.  Any other
 // search that comes across a link that is now in a chain also starts
 // over.  Going down is sufficient to find all of the links, as every
-// link has some chain above it.
+// link has some chain above it.  After a spill there may be links that
+// are only reachable through the spilled one.  These stay in memory, and
+// the value is loaded when it reaches the chain below them.
 //
 // A path can be merged with a set of chains, which may be empty, if
 // none of their live ranges overlap and doing so meets the
@@ -77,23 +83,37 @@
 // all of these counted as they will be after the merge.  The result
 // must either have fewer than N significant neighbors (Briggs) or have
 // all of its significant neighbors already be neighbors of one of the
-// chains being merged (George).  If no merge is possible then something needs to be
-// spilled, which is not implemented.  The criteria are conservative, so
-// it may be that no spill was actually required.
+// chains being merged (George).
 //
-// Once all links are in chains they are assigned registers using the
-// usual graph coloring algorithm, which the criteria ensure will
-// succeed.  Moves then need to be inserted wherever a link in one chain
-// connects to one in a chain with a different register.  These moves
-// always come between calls, as any link that begins or ends within a
-// call is the start or end of a value.  The moves are returned in a map
-// from calls to the moves that have to happen there.  Moves between
-// blocks are done either as part of a jump or, following a conditional,
-// before the first call in the next block.
+// If a path can't be added as a whole then the links in it are tried
+// individually, from the lower end up.  The first that can't be put in
+// a chain is spilled.  The links above it are left for other paths.  Any
+// link that never ends up in a chain is in memory.  There is no
+// backtracking.  The search priorities are intended to make the
+// link that does not get a register the right one to spill.
 //
-// That should be enough to allocate registers for procedures where
-// there are sufficient registers to avoid any spilling.  I would like to
-// get that much working before addressing ones that require spilling.
+// Constants are not stored in memory.  They are instead loaded wherever
+// they are needed and are not already in a register, with nothing done
+// where they are bound.  As there may be no chain there, there is a
+// search that starts from the link where each constant is bound.  There
+// is also one from each output of a JumpLambda that has a constant as an
+// argument, as that may be the only source of the output's value.
+//
+// The chains are then assigned registers using the usual graph coloring
+// algorithm, which the criteria ensure will succeed.  This leaves:
+//  - Moves, wherever a link in one chain connects to one in a chain with
+//    a different register.
+//  - Stores, where values that are ever in memory are created.  If an
+//    output of a JumpLambda is in memory then so are the arguments that
+//    are passed to it, if they can share the same slot.  Otherwise the
+//    value is stored by the jump.
+//  - Loads, from memory or of a constant, where a link that is not in a
+//    chain connects to one that is.
+// These always come between calls, as any link that begins or ends within
+// a call is the start or end of a value.  They are returned in a map from
+// calls to what has to happen there.  Those between blocks are done either
+// as part of a jump or, following a conditional, before the first call in
+// the next block.
 
 package cps
 
@@ -117,7 +137,11 @@ func (vart *VariableT) Register() RegisterT {
 	if vart.definition == nil {
 		return nil
 	}
-	return vart.definition.chain.root().Register
+	chain := vart.definition.chain.root()
+	if chain == nil {
+		return nil // a constant that is loaded when it is needed
+	}
+	return chain.Register
 }
 
 func (vart *VariableT) ReferenceRegister(node NodeT) RegisterT {
@@ -126,6 +150,15 @@ func (vart *VariableT) ReferenceRegister(node NodeT) RegisterT {
 		panic(fmt.Sprintf("No register for %s", node))
 	}
 	return link.chain.root().Register
+}
+
+// Returns the literal if the variable is bound to a constant.  These are
+// never stored in memory, as they can be loaded whenever they are needed.
+func (vart *VariableT) constant() NodeT {
+	if vart.Binder != nil && vart.Binder.Primop.Name() == "loadReg" {
+		return vart.Binder.Inputs[0]
+	}
+	return nil
 }
 
 func (vart *VariableT) addUse(node NodeT, link *linkT) {
@@ -144,6 +177,7 @@ type linkT struct {
 	ends       []*linkT
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
+	spilled    bool      // it cannot be in a chain
 	loopDepth  int       // depth of the innermost loop containing the link
 }
 
@@ -159,8 +193,7 @@ func joinLinks(from *linkT, to *linkT) {
 	Push(&from.ends, to)
 }
 
-func printVarLinks(vart *VariableT) {
-	link := vart.definition
+func printVarLinks(vart *VariableT, link *linkT) {
 	seen := util.SetT[*linkT]{}
 	fmt.Printf("%s:\n", vart)
 	var printLink func(link *linkT, indent string)
@@ -260,7 +293,8 @@ type regBlockT struct {
 	seen       bool
 	loop       *regLoopT            // innermost loop containing this block, if any
 	liveIn     util.SetT[*VariableT] // variables live at the start of the block
-	jumpLinks []*linkT              // links for jump arguments at end
+	liveOutputs util.SetT[*VariableT] // JumpLambda outputs whose values are used
+	jumpArgs  []*VariableT          // jump arguments, nil if not in a register
 	liveLinks map[*VariableT]*liveLinkT // when done these are for the start of the block
 	endLinks  map[*VariableT]*linkT     // links live at the end of the block
 	inputSpecs  [][]*RegUseSpecT // cached for each call in the block
@@ -313,8 +347,7 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 		}
 		if call == end {
 			if end.Primop.Name() == "jump" {
-				// -1 because we don't need the jump target.
-				block.jumpLinks = make([]*linkT, len(end.Inputs) - 1)
+				block.jumpArgs = findJumpArgs(end, inputs)
 			}
 			break
 		}
@@ -338,17 +371,19 @@ type allocatorT struct {
 	numProgramPoints int
 
 	allChains util.SetT[*chainT]
+	// Links with values that don't come from a chain.
+	rootLinks []*linkT
 	// The chains that are live at each program point.
 	chainPoints []util.SetT[*chainT]
 	searchQueue *util.PriorityQueueT[*searchT]
 }
 
-// Returns the register moves needed at each call.
+// Returns the moves, loads and stores needed at each call.
 
 func AllocateRegisters(
 	top *CallNodeT,
 	classes ...*RegisterClassT,
-) map[*CallNodeT]*RegMovesT {
+) *RegAllocationT {
 	makeVarsForLiterals()
 	allocator := &allocatorT{
 		allVars: util.NewSet[*VariableT](),
@@ -361,7 +396,7 @@ func AllocateRegisters(
 func (alloc *allocatorT) allocate(
 	top *CallNodeT,
 	classes []*RegisterClassT,
-) map[*CallNodeT]*RegMovesT {
+) *RegAllocationT {
 	top.SetFlag(1)
 	FindBasicBlocks[*regBlockT](top, makeRegBlock)
 	blocks := orderBlocks(top.Block.(*regBlockT))
@@ -377,7 +412,17 @@ func (alloc *allocatorT) allocate(
 
 	// Sort the variables to get deterministic behavior.
 	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
-		printVarLinks(vart)
+		if vart.definition != nil {
+			printVarLinks(vart, vart.definition)
+		}
+	}
+	for _, block := range blocks {
+		for _, vart := range block.start.Outputs {
+			liveLink := block.liveLinks[vart]
+			if liveLink != nil {
+				printVarLinks(vart, liveLink.link)
+			}
+		}
 	}
 
 	alloc.mergeChains()
@@ -421,7 +466,7 @@ func (alloc *allocatorT) makeLinks(blocks []*regBlockT) {
 	// processed after the block.
 	for _, block := range blocks {
 		block.connectNext()
-		block.connectJump()
+		alloc.connectJump(block)
 	}
 }
 
@@ -446,7 +491,9 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	lateIndex := block.endIndex - 1
 	for call := block.end; 0 <= callIndex ; call = call.parent {
 		for i, spec := range block.outputSpecs[callIndex] {
-			if spec == nil {
+			// The values of a JumpLambda's outputs come from the jumps to it,
+			// so they are just live at the start of the block.
+			if spec == nil || call.CallType == JumpLambda {
 				continue
 			}
 			vart := call.Outputs[i]
@@ -454,17 +501,30 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			start := lateIndex + spec.PhaseOffset
 			end := lateIndex + 1 // inclusive -> exclusive
 
-			link := alloc.addAnchorLink(vart, start, end, spec.Class, block.liveLinks[vart])
-			vart.definition = link
+			liveLink := block.liveLinks[vart]
+			if vart.constant() == nil {
+				vart.definition = alloc.addAnchorLink(vart, start, end, spec.Class, liveLink)
+			} else if liveLink != nil {
+				// Not an anchor, as this does not have to be in a register.
+				link := block.makeLink(vart)
+				link.liveRange.add(intervalT{start, end})
+				connectBelow(link, end, liveLink)
+				vart.definition = link
+				Push(&alloc.rootLinks, link)
+			}
 			delete(block.liveLinks, vart)
 		}
 
-		for _, input := range getInputs(call, block.inputSpecs[callIndex]) {
+		inputs := getInputs(call, block.inputSpecs[callIndex])
+		if call.Primop.Name() == "jump" {
+			inputs = nil // these just need to be live at the end of the block
+		}
+		for _, input := range inputs {
 			vart := input.variable
 			start := lateIndex + EarlyRegUse
 			end := lateIndex + input.phaseOffset + 1 // +1 for inclusive to exclusive
 			liveLink := block.liveLinks[vart]
-			if liveLink != nil || call.Primop.Name() == "jump" {
+			if liveLink != nil {
 				// Cover the entire call if the value is needed after it.
 				// This ensures that moves are only needed between calls.
 				end = lateIndex + 1
@@ -472,10 +532,6 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			link := alloc.addAnchorLink(vart, start, end, input.class, liveLink)
 			for _, index := range input.argIndexes {
 				vart.addUse(call.Inputs[index], link)
-				if call.Primop.Name() == "jump" {
-					// -1 because we don't need the jump target
-					block.jumpLinks[index - 1] = link
-				}
 			}
 			connectLink := block.makeLink(vart)
 			joinLinks(connectLink, link)
@@ -522,26 +578,41 @@ func (block *regBlockT) connectNext() {
 	}
 }
 
-// If the block ends with a jump, connect the jump's arguments to the
-// outputs of the JumpLambda it jumps to.  The connecting links contain
-// no program points.
+// If the block ends with a jump, connect the links of the jump's arguments
+// to those of the outputs of the JumpLambda it jumps to.
 
-func (block *regBlockT) connectJump() {
-	if block.end.Primop.Name() != "jump" {
-		return
-	}
-	target := CalledLambda(block.end)
-	for i, argument := range block.jumpLinks {
-		// Either can be nil if it is not in a register.
-		output := target.Outputs[i].definition
-		if argument == nil || output == nil {
-			continue
+func (alloc *allocatorT) connectJump(block *regBlockT) {
+	for i, argument := range block.jumpArgs {
+		// The output may not be used.
+		output := block.next[0].outputLink(i)
+		if argument != nil && output != nil {
+			joinLinks(block.endLinks[argument], output)
+			// Constants may not be in chains.
+			if argument.constant() != nil && !slices.Contains(alloc.rootLinks, output) {
+				Push(&alloc.rootLinks, output)
+			}
 		}
-		connectLink := block.makeLink(argument.variable)
-		connectLink.loopDepth = commonLoop(block, target.Block.(*regBlockT)).depth()
-		joinLinks(argument, connectLink)
-		joinLinks(connectLink, output)
 	}
+}
+
+// The link for the i'th output of a JumpLambda, or nil if it isn't used.
+func (block *regBlockT) outputLink(i int) *linkT {
+	liveLink := block.liveLinks[block.start.Outputs[i]]
+	if liveLink == nil {
+		return nil
+	}
+	return liveLink.link
+}
+
+// The first input is the jump target.
+func findJumpArgs(jump *CallNodeT, specs []*RegUseSpecT) []*VariableT {
+	args := make([]*VariableT, len(jump.Inputs)-1)
+	for i := range args {
+		if specs[i+1] != nil {
+			args[i] = jump.Inputs[i+1].(*ReferenceNodeT).Variable
+		}
+	}
+	return args
 }
 
 func sortedVars(vars iter.Seq[*VariableT]) []*VariableT {
@@ -598,11 +669,16 @@ func (alloc *allocatorT) addAnchorLink(
 	}
 	// It's nil if vart is never referenced.
 	if liveLink != nil {
-		if liveLink.endIndex != end {
-			liveLink.link.liveRange.add(intervalT{end, liveLink.endIndex})
-		}
-		joinLinks(link, liveLink.link)
+		connectBelow(link, end, liveLink)
 	}
 	alloc.allChains.Add(newChain(link, class))
 	return link
+}
+
+// Connect a link that ends at 'end' to the one below it.
+func connectBelow(link *linkT, end int, liveLink *liveLinkT) {
+	if liveLink.endIndex != end {
+		liveLink.link.liveRange.add(intervalT{end, liveLink.endIndex})
+	}
+	joinLinks(link, liveLink.link)
 }

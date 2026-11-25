@@ -19,8 +19,9 @@ func TestMovesRandom(t *testing.T) {
 		blocks := orderBlocks(randomTestBlocks(random, 10, 5, seed%2 == 0)[0])
 		alloc := newTestAllocator(blocks)
 		alloc.makeLinks(blocks)
-		for link := range allTestLinks(alloc) {
-			if link.chain == nil {
+		for _, link := range alloc.allLinks() {
+			// And some are left in memory.
+			if link.chain == nil && random.Intn(4) < seed%5 {
 				alloc.allChains.Add(newChain(link, testClass))
 			}
 		}
@@ -39,7 +40,7 @@ func TestMovesRandom(t *testing.T) {
 			chain.Register = testClass.firstRegister(available)
 		}
 		checkAllocation(t, alloc)
-		moves := alloc.findMoves(blocks)
+		moves := alloc.findMoves(blocks).Moves
 		for _, callMoves := range moves {
 			count += len(callMoves.Before) + len(callMoves.Jump)
 		}
@@ -70,12 +71,12 @@ func TestMovePlacement(t *testing.T) {
 	for _, chain := range alloc.sortedChains() {
 		chain.Register = testClass.registers[0]
 	}
-	setRegister := func(link *linkT, i int) RegisterT {
+	setRegister := func(link *linkT, i int) RegLocationT {
 		if link.chain == nil {
 			alloc.allChains.Add(newChain(link, testClass))
 		}
 		link.chain.Register = testClass.registers[i]
-		return link.chain.Register
+		return RegLocationT{Register: link.chain.Register}
 	}
 	definition := setRegister(x.definition, 1)
 	use := setRegister(x.uses[blocks[0].calls()[1].Inputs[0]], 2)
@@ -86,7 +87,7 @@ func TestMovePlacement(t *testing.T) {
 	use1 := setRegister(x.uses[blocks[1].end.Inputs[0]], 6)
 	use2 := setRegister(x.uses[blocks[2].end.Inputs[0]], 7)
 
-	moves := alloc.findMoves(blocks)
+	moves := alloc.findMoves(blocks).Moves
 	tests := []struct {
 		call *CallNodeT
 		move RegMoveT
@@ -106,5 +107,105 @@ func TestMovePlacement(t *testing.T) {
 	}
 	if len(moves) != len(tests) {
 		t.Errorf("moves at %d calls, expected %d", len(moves), len(tests))
+	}
+}
+
+// A value that is passed around a loop without being used there, and for
+// which there is no register, is stored once before the loop and loaded
+// after it.  It is bound to 'a' outside the loop and 'q' inside.
+func TestSpillAroundLoop(t *testing.T) {
+	setTestRegisters(2)
+	vars := testVars("a q x y")
+	a, q, x, y := vars[0], vars[1], vars[2], vars[3]
+	xy := []*VariableT{x, y}
+	qs := []*VariableT{q}
+
+	entry := makeRegBlock()
+	entry.addTestCall(nil, EarlyRegUse, []*VariableT{a}, LateRegUse)
+	entry.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	entry.addTestCall([]*VariableT{a}, EarlyRegUse, nil, LateRegUse)
+	loop := makeRegBlock()
+	loop.addTestCall(nil, EarlyRegUse, qs, LateRegUse)
+	loop.addTestCall(nil, EarlyRegUse, xy, LateRegUse)
+	loop.addTestCall(xy, EarlyRegUse, nil, LateRegUse)
+	back := makeRegBlock()
+	back.addTestCall(qs, EarlyRegUse, nil, LateRegUse)
+	exit := makeRegBlock()
+	exit.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	exit.addTestCall(qs, EarlyRegUse, nil, LateRegUse)
+	entry.makeTestJump(loop)
+	back.makeTestJump(loop)
+	loop.addNext(back)
+	loop.addNext(exit)
+
+	blocks := orderBlocks(entry)
+	alloc := allocateTestBlocks(blocks)
+	checkAllocation(t, alloc)
+	allocation := alloc.findMoves(blocks)
+	if allocation.NumSlots != 1 {
+		t.Errorf("%d slots, expected 1", allocation.NumSlots)
+	}
+	slot := RegLocationT{}
+	store := RegMoveT{RegLocationT{Register: a.Register()}, slot}
+	load := RegMoveT{slot, RegLocationT{Register: q.ReferenceRegister(exit.end.Inputs[0])}}
+	for _, block := range blocks {
+		for i, call := range block.calls() {
+			moves := allocation.Moves[call]
+			if moves == nil {
+				moves = &RegMovesT{}
+			}
+			if len(moves.Jump) != 0 {
+				t.Errorf("there should be nothing to do at jumps")
+			}
+			expected := []RegMoveT{}
+			if block == entry && i == 1 {
+				expected = append(expected, store)
+			} else if block == exit && len(moves.Before) != 0 {
+				// It can be loaded at either call.
+				expected = append(expected, load)
+			}
+			if !slices.Equal(moves.Before, expected) {
+				t.Errorf("wrong moves %v", moves.Before)
+			}
+		}
+	}
+	for range 10 {
+		simulate(t, rand.New(rand.NewSource(1)), entry, allocation.Moves, 20)
+	}
+}
+
+// Around the loop p and q are only ever passed to each other.
+func TestUnusedOutputs(t *testing.T) {
+	vars := testVars("a p q")
+	a, p, q := vars[0], vars[1], vars[2]
+	entry := makeRegBlock()
+	entry.addTestCall(nil, EarlyRegUse, []*VariableT{a}, LateRegUse)
+	entry.addTestCall([]*VariableT{a, a}, EarlyRegUse, nil, LateRegUse)
+	loop := makeRegBlock()
+	loop.addTestCall(nil, EarlyRegUse, []*VariableT{p, q}, LateRegUse)
+	loop.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	back := makeRegBlock()
+	back.addTestCall([]*VariableT{q, p}, EarlyRegUse, nil, LateRegUse)
+	exit := makeRegBlock()
+	exit.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	entry.makeTestJump(loop)
+	back.makeTestJump(loop)
+	loop.addNext(back)
+	loop.addNext(exit)
+	blocks := orderBlocks(entry)
+	alloc := newTestAllocator(blocks)
+	alloc.makeLinks(blocks)
+	if len(alloc.allLinks()) != 1 {
+		t.Errorf("only a's definition should have a link")
+	}
+
+	// They are needed if either one is used.
+	exit.addTestCall([]*VariableT{q}, EarlyRegUse, nil, LateRegUse)
+	alloc = newTestAllocator(blocks)
+	alloc.makeLinks(blocks)
+	for _, vart := range []*VariableT{p, q} {
+		if loop.liveLinks[vart] == nil || back.endLinks[vart] == nil {
+			t.Errorf("%s should be live", vart.Name)
+		}
 	}
 }

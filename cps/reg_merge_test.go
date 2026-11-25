@@ -156,7 +156,7 @@ func TestMergeBranches(t *testing.T) {
 			if len(alloc.allChains) != 2 {
 				t.Errorf("got %d chains, expected 2", len(alloc.allChains))
 			}
-			if len(alloc.findMoves(blocks)) != 0 {
+			if len(alloc.findMoves(blocks).Moves) != 0 {
 				t.Errorf("unexpected moves")
 			}
 		})
@@ -203,17 +203,26 @@ func TestMergeJump(t *testing.T) {
 	entry.makeTestJump(target)
 	alloc := allocateTestBlocks([]*regBlockT{entry, target})
 	checkAllocation(t, alloc)
-	if a.Register() != p.Register() {
+	if blockRegister(entry, a) != blockRegister(target, p) {
 		t.Errorf("a and p are in different registers")
 	}
-	if b.Register() == q.Register() {
+	if blockRegister(entry, b) == blockRegister(target, q) {
 		t.Errorf("b and q are in the same register")
 	}
-	moves := alloc.findMoves([]*regBlockT{entry, target})
-	expected := []RegMoveT{{b.ReferenceRegister(entry.end.Inputs[2]), q.Register()}}
-	if len(moves) != 1 || !slices.Equal(moves[entry.end].Jump, expected) {
+	// The other is copied.
+	moves := alloc.findMoves([]*regBlockT{entry, target}).Moves
+	if len(moves) != 1 || len(moves[entry.end].Before) != 0 || len(moves[entry.end].Jump) != 1 {
 		t.Errorf("wrong moves")
 	}
+}
+
+// The register of the link at the end of a block or for an output at the start.
+func blockRegister(block *regBlockT, vart *VariableT) RegisterT {
+	link := block.endLinks[vart]
+	if link == nil {
+		link = block.liveLinks[vart].link
+	}
+	return link.chain.root().Register
 }
 
 // Make a random block go back to an earlier one, which must dominate it.
@@ -377,6 +386,11 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 			if maxLive <= len(vars) {
 				outputs = nil
 			}
+			if len(outputs) == 1 && random.Intn(3) == 0 {
+				block.addTestConstant(outputs[0])
+				vars.Add(outputs...)
+				continue
+			}
 			block.addTestCall(pick(random.Intn(3)), -random.Intn(2), outputs, -random.Intn(2))
 			vars.Add(outputs...)
 		}
@@ -415,25 +429,22 @@ func TestMergeDeterministic(t *testing.T) {
 		blocks := randomTestBlocks(rand.New(rand.NewSource(int64(seed))), 10, 5, seed%2 == 0)
 		firstLink := nextLinkIdx
 		result := ""
-		alloc := (*allocatorT)(nil)
-		func() {
-			defer func() {
-				problem := recover()
-				if problem != nil {
-					result = fmt.Sprint(problem)
-				}
-			}()
-			alloc = allocateTestBlocks(blocks)
-		}()
-		if alloc == nil {
-			return result
-		}
+		alloc := allocateTestBlocks(blocks)
 		for _, chain := range alloc.sortedChains() {
 			result += fmt.Sprintf("%s:", chain.Register)
 			for _, link := range chain.links {
 				result += fmt.Sprintf(" %d%v", link.id-firstLink, link.liveRange.intervals)
 			}
 			result += "\n"
+		}
+		allocation := alloc.findMoves(blocks)
+		for _, block := range blocks {
+			for _, call := range block.calls() {
+				moves := allocation.Moves[call]
+				if moves != nil {
+					result += fmt.Sprintf("%v\n", *moves)
+				}
+			}
 		}
 		return result
 	}
@@ -458,31 +469,46 @@ func simulate(
 	maxBlocks int,
 ) {
 	t.Helper()
-	registers := map[RegisterT]int{}
+	locations := map[RegLocationT]int{} // registers and slots
 	values := map[*VariableT]int{}
 	nextValue := 1
 	read := func(call *CallNodeT, i int) int {
 		vart := call.Inputs[i].(*ReferenceNodeT).Variable
-		value := registers[vart.ReferenceRegister(call.Inputs[i])]
+		value := locations[RegLocationT{Register: vart.ReferenceRegister(call.Inputs[i])}]
 		if value != values[vart] {
 			t.Fatalf("%s_%d has the wrong value", vart.Name, vart.Id)
 		}
 		return value
 	}
 	write := func(vart *VariableT, value int) {
-		registers[vart.Register()] = value
+		constant := vart.constant()
+		if constant != nil {
+			// The value is always the same and can be loaded at any point.
+			location := RegLocationT{Constant: constant}
+			if locations[location] == 0 {
+				locations[location] = value
+			}
+			value = locations[location]
+		}
+		// Constants and unused values may not have registers.
+		if vart.Register() != nil {
+			locations[RegLocationT{Register: vart.Register()}] = value
+		}
 		values[vart] = value
 	}
 	doMoves := func(moves []RegMoveT) {
-		moved := map[RegisterT]int{}
+		moved := map[RegLocationT]int{}
 		for _, move := range moves {
+			if move.To.Constant != nil {
+				t.Fatalf("move to a constant")
+			}
 			_, found := moved[move.To]
 			if found {
-				t.Fatalf("two moves to the same register")
+				t.Fatalf("two moves to the same location")
 			}
-			moved[move.To] = registers[move.From]
+			moved[move.To] = locations[move.From]
 		}
-		maps.Copy(registers, moved)
+		maps.Copy(locations, moved)
 	}
 	arguments := []int{} // from the previous block's jump
 	block := start
@@ -498,9 +524,12 @@ func simulate(
 			for _, phase := range []int{EarlyRegUse, LateRegUse} {
 				for j, spec := range block.inputSpecs[i] {
 					if spec != nil && spec.PhaseOffset == phase {
-						value := read(call, j)
 						if isJump {
-							Push(&arguments, value)
+							// These may not be in registers.
+							vart := call.Inputs[j].(*ReferenceNodeT).Variable
+							Push(&arguments, values[vart])
+						} else {
+							read(call, j)
 						}
 					}
 				}
@@ -508,11 +537,7 @@ func simulate(
 					if spec.PhaseOffset != phase {
 						continue
 					} else if len(jumpArguments) != 0 {
-						// Already in its register.
-						values[call.Outputs[j]] = jumpArguments[j]
-						if registers[call.Outputs[j].Register()] != jumpArguments[j] {
-							t.Fatalf("wrong value for jump argument")
-						}
+						values[call.Outputs[j]] = jumpArguments[j] // moved by the jump
 					} else {
 						write(call.Outputs[j], nextValue)
 						nextValue += 1
@@ -531,26 +556,6 @@ func simulate(
 	}
 }
 
-// Every link, starting from those that are in chains.
-func allTestLinks(alloc *allocatorT) util.SetT[*linkT] {
-	links := util.NewSet[*linkT]()
-	var visit func(link *linkT)
-	visit = func(link *linkT) {
-		if !links.Contains(link) {
-			links.Add(link)
-			for _, next := range slices.Concat(link.starts, link.ends) {
-				visit(next)
-			}
-		}
-	}
-	for chain := range alloc.allChains {
-		for _, link := range chain.links {
-			visit(link)
-		}
-	}
-	return links
-}
-
 // No variable may have two links at a program point.
 func checkLinks(t *testing.T, alloc *allocatorT) {
 	t.Helper()
@@ -559,7 +564,7 @@ func checkLinks(t *testing.T, alloc *allocatorT) {
 		point int
 	}
 	points := util.NewSet[pointT]()
-	for link := range allTestLinks(alloc) {
+	for _, link := range alloc.allLinks() {
 		for _, interval := range link.liveRange.intervals {
 			for i := interval.start; i < interval.end; i++ {
 				point := pointT{link.variable, i}
@@ -580,12 +585,7 @@ func TestMergeRandom(t *testing.T) {
 		random := rand.New(rand.NewSource(int64(seed)))
 		loops := seed%4 != 0
 		blocks := orderBlocks(randomTestBlocks(random, 12, registers-1, loops)[0])
-		var problem any
-		var alloc *allocatorT
-		func() {
-			defer func() { problem = recover() }()
-			alloc = allocateTestBlocks(blocks)
-		}()
+		alloc := allocateTestBlocks(blocks)
 		kind := "straight"
 		for _, block := range blocks {
 			if block.loop != nil {
@@ -596,32 +596,15 @@ func TestMergeRandom(t *testing.T) {
 				}
 			}
 		}
-		if problem != nil {
-			message := fmt.Sprint(problem)
-			if strings.Contains(message, "spilling") {
-				results[kind+" spill"] += 1
-				continue
-			}
-			t.Fatalf("seed %d: %s", seed, message)
-		}
 		checkLinks(t, alloc)
 		checkAllocation(t, alloc)
-		moves := alloc.findMoves(blocks)
-		hasMoves := false
-		for call, callMoves := range moves {
-			// Jumps usually have some.
-			if len(callMoves.Before) != 0 ||
-				len(call.Inputs)-1 < len(callMoves.Jump) {
-				hasMoves = true
-			}
-		}
-		if hasMoves {
-			results[kind+" moves"] += 1
-		} else {
-			results[kind+" no moves"] += 1
+		allocation := alloc.findMoves(blocks)
+		results[kind] += 1
+		if 0 < allocation.NumSlots {
+			results[kind+" with spills"] += 1
 		}
 		for range 10 {
-			simulate(t, random, blocks[0], moves, 60)
+			simulate(t, random, blocks[0], allocation.Moves, 60)
 		}
 	}
 	t.Logf("%v", results)
