@@ -151,6 +151,15 @@ func (live *liveRangeT) add(interval intervalT) {
 	live.intervals = append(live.intervals, interval)
 }
 
+// The number of program points in the live range.
+func (live *liveRangeT) size() int {
+	size := 0
+	for _, interval := range live.intervals {
+		size += interval.end - interval.start
+	}
+	return size
+}
+
 func (live *liveRangeT) conflicts(other *liveRangeT) bool {
 	x := live.intervals
 	y := other.intervals

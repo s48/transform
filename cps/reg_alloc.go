@@ -6,21 +6,21 @@
 // Registers will be assigned to 'chains'.  The initial set
 // of chains are just the inputs and outputs of each call
 // (ignoring those that do not need to be in registers).
-// The can necessarily be assigned registers, as any single
-// call is limited to the architectures registers.
+// They can necessarily be assigned registers, as any single
+// call is limited to the architecture's registers.
 // A chain consists of a set of connected links.
 //
 // A 'link' is a live range that could be assigned a register.
 // A link has:
 //   - The set of program points in its live range.
-//   - 'Starts' which is a slice of links from which can receive a value.
+//   - 'Starts' which is a slice of links from which it can receive a value.
 //   - 'Ends' which is a slice of links to which it provides a value.
 //   - A chain, if it has been assigned to one.
 // Initially, the inputs and outputs of all calls have a chain
 // with a single link that covers just that call.  These are
 // connected by additional links, not initially in chains, that
 // connect definitions and uses of variables.  For example, if
-// variable X is defined in call A and has two uses, on in call
+// variable X is defined in call A and has two uses, one in call
 // B and the next in call C then we will get the following:
 //  - Three links with anchors, one for each of the calls.
 //  - Two connecting links without anchors, one between the
@@ -28,44 +28,57 @@
 //    links.
 //  - Thus the A anchor link will have no starts and one end,
 //    the one at B will have one start and one end, and the
-//    the one at C will have one end.
-// Conditionals and jumps also connect links.  When all links have
-// been added you can follow the links from a variable's definition to
-// all of its references.  The combined live ranges of those links are
-// the the variable's live range.
+//    one at C will have one start and no ends.
+// Links end at the end of a basic block and are connected to the
+// links for the same variable at the start of the following blocks.
+// Thus there are no parallel links: at each program point a variable
+// has at most one link.  Jump arguments are connected to the outputs
+// of the JumpLambda by links that contain no program points.  When
+// all links have been added you can follow the links from a variable's
+// definition to all of its references.  The combined live ranges of
+// those links are the variable's live range.
 //
-// The next step is to join the anchor-less links into 'paths', where
-// each path contains all links that lead from one anchor to another.
-// In the example above there would be two paths, each containing one
-// of the connecting links.  In more complex cases a path may contain
-// many links.
+// The next step is to merge chains using the links between them
+// in such a way that the normal coloring algorithm will be able to
+// assign a register to each chain.
 //
-// Paths are assigned a priority based on a hueristic and kept in a
-// priority queue.  The highest priorty path is taken off the queue
-// and checked to see if it can be assigned a register.  This requires
-// looking at the set of chains that its live range overlaps, called
-// neighbors.  If there are N registers we can turn the path into a
-// chain if it has fewer than N neighbors that have N-1 neighbors
-// themselves.
+// The main data structure is a priority queue of searches, one for
+// each chain that has links below it that are not yet in chains.  A
+// search is a tree of such links, going down from the chain.  A link
+// is only added to a tree once, so the number of paths does not
+// matter.  Searches are ordered by the depth of their shallowest leaf,
+// in units of program points, with shallower ones having priority over
+// deeper ones.  Links from jump arguments to outputs come after all
+// others.  They have no length and would otherwise come first, which
+// can keep an argument that is live after the jump from being merged
+// with the rest of its own variable.
 //
-// When converting a path to a chain we first see if it can be joined
-// to either or both of the chains it connects without breaking the
-// neighbor criteria listed above.
+// The algorithm progresses by removing the first search and extending
+// it along its shallowest leaf.  If this reaches a chain, possibly the
+// one it started from, then the path to it is made into a chain, merged
+// with both of the chains it connects if possible, or with one or the
+// other, or with neither.  The search for the upper chain, and for the
+// path's chain if that is different, then start over.  The search for
+// any chain that was merged into another is cancelled.  Any other
+// search that comes across a link that is now in a chain also starts
+// over.  Going down is sufficient to find all of the links, as every
+// link has some chain above it.
 //
-// After converting a path to a chain the links in the path need to be
-// removed from any other paths that contain them.  Those paths are
-// removed from the priority queue.  The portions of them that are not
-// part of the new chain are then added back to the queue as new,
-// shorter paths.  For example, if path has four links and the second
-// link is in the new chain, then there are two new paths, the first
-// containing the first link and the second containing the last two.
-// These paths connect the new chain with the chains at the ends of
-// the original path.
+// A path can be merged with a set of chains, which may be empty, if
+// none of their live ranges overlap and doing so meets the
+// neighbor-count criteria.  The neighbors of a chain are the chains
+// whose live ranges overlap its own.  If there are N registers then
+// the result must have fewer than N neighbors that have N or more
+// neighbors themselves, with all of these counted as they will be
+// after the merge.  If no merge is possible then something needs to be
+// spilled, which is not implemented.  The criteria are conservative, so
+// it may be that no spill was actually required.
 //
-// Once all links are part of chain (assuming no spilling is required)
-// registers can be assigned to them using the usual graph coloring
-// algorithm.  Moves then need to be inserted wherever a link in one
-// chain connects to one in another chain.
+// Once all links are in chains they are assigned registers using the
+// usual graph coloring algorithm, which the criteria ensure will
+// succeed.  Moves then need to be inserted wherever a link in one chain
+// connects to one in a chain with a different register.  The moves for
+// jump arguments are done by the jump.  Other moves are not implemented.
 //
 // That should be enough to allocate registers for loop-free procedures
 // where there are sufficient register to avoid any spilling.  I would
@@ -76,8 +89,9 @@ package cps
 
 import (
 	"fmt"
+	"iter"
+	"maps"
 	"slices"
-	"sort"
 
 	"github.com/s48/transform/util"
 )
@@ -120,7 +134,6 @@ type linkT struct {
 	ends       []*linkT
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
-	paths      []*pathT
 }
 
 var nextLinkIdx = -1
@@ -133,21 +146,6 @@ func nextLinkId () int {
 func joinLinks(from *linkT, to *linkT) {
 	Push(&to.starts, from)
 	Push(&from.ends, to)
-}
-
-func (link *linkT) addPath(path *pathT) {
-	Push(&link.paths, path)
-}
-
-func (link *linkT) removePath(path *pathT) {
-	i := slices.Index(link.paths, path)
-	if i < 0 {
-		return
-	}
-	paths := link.paths
-	last := len(paths) - 1
-	paths[i] = paths[last]
-    link.paths = paths[:last]
 }
 
 func printVarLinks(vart *VariableT) {
@@ -185,6 +183,7 @@ type chainT struct {
 	liveRange *liveRangeT      // All of the links' intervals combined.
 	class     *RegisterClassT
 	conflicts util.SetT[*chainT]
+	search    *searchT         // for links below this, if there are any
 	Register  RegisterT        // what gets assigned to this
 	peer      *chainT
 }
@@ -246,7 +245,6 @@ type regBlockT struct {
 	endIndex   int // program point after the late phase of 'end'
 	callCount  int // number of calls in the block
 	next       []*regBlockT
-	previous   []*regBlockT
 
 	seen       bool
 
@@ -254,14 +252,6 @@ type regBlockT struct {
 	liveLinks map[*VariableT]*liveLinkT
 	inputSpecs  [][]*RegUseSpecT // cached for each call in the block
 	outputSpecs [][]*RegUseSpecT
-
-	// Only in the blocks of procedure nodes.
-	blocks     []*regBlockT // all the blocks in this procedure
-	callsTo    util.SetT[*CallNodeT]
-	calledFrom util.SetT[*CallNodeT]
-	// How many registers of each class are used in this procedure.
-	regCounts   map[*RegisterClassT]int
-	//liveBundles util.SetT[*bundleT]
 }
 
 // liveLinkT represents a live variable during the bottom-up scan
@@ -275,16 +265,11 @@ func makeRegBlock() *regBlockT {
 	return &regBlockT{}
 }
 
-// Finds the bound and live variables in the block.
+// Caches the register specs of the block's calls.
 
 func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	block.start = start
 	block.end = end
-	if start.CallType == ProcLambda {
-		block.callsTo = util.NewSet[*CallNodeT]()
-		block.calledFrom = util.NewSet[*CallNodeT]()
-		block.regCounts = map[*RegisterClassT]int{}
-	}
 	for call := start; ; call = call.Next[0] {
 		inputs, outputs := call.Primop.RegisterUsage(call)
 		for _, spec := range inputs {
@@ -325,9 +310,7 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 }
 
 func (block *regBlockT) addNext(rawNext BasicBlockT) {
-	next := rawNext.(*regBlockT)
-	block.next = append(block.next, next)
-	next.previous = append(next.previous, block)
+	block.next = append(block.next, rawNext.(*regBlockT))
 }
 
 func (block *regBlockT) getEnd() *CallNodeT {
@@ -335,7 +318,6 @@ func (block *regBlockT) getEnd() *CallNodeT {
 }
 
 type allocatorT struct {
-	procs []*CallNodeT
 	allVars util.SetT[*VariableT]
 
 	// This includes early and late points for each CPS call in the
@@ -343,22 +325,16 @@ type allocatorT struct {
 	numProgramPoints int
 
 	allChains util.SetT[*chainT]
-	coloringQueue *util.PriorityQueueT[*pathT]
+	// The chains that are live at each program point.
 	chainPoints []util.SetT[*chainT]
-	chainPointDiffs []util.SetT[*chainT]
-	anchorLinks map[any]*linkT
-
-	// Procedure calls, indexed by program point.
-	procCalls map[int]*regBlockT
+	searchQueue *util.PriorityQueueT[*searchT]
 }
 
 func AllocateRegisters(top *CallNodeT, classes ...*RegisterClassT) {
 	makeVarsForLiterals()
 	allocator := &allocatorT{
-		procCalls: map[int]*regBlockT{},
 		allVars: util.NewSet[*VariableT](),
 		allChains: util.NewSet[*chainT](),
-		anchorLinks: map[any]*linkT{},
 	}
 	PpCps(top)
 	allocator.allocate(top, classes)
@@ -366,9 +342,7 @@ func AllocateRegisters(top *CallNodeT, classes ...*RegisterClassT) {
 
 func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
 	top.SetFlag(1)
-	bbs := FindBasicBlocks[*regBlockT](top, makeRegBlock)
-	top.Block.(*regBlockT).blocks = bbs
-
+	FindBasicBlocks[*regBlockT](top, makeRegBlock)
 	blocks := orderBlocks(top.Block.(*regBlockT))
 	index := 0
 	for _, block := range blocks {
@@ -379,7 +353,6 @@ func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
 
 	alloc.numProgramPoints = index
 	for i := len(blocks) - 1; 0 <= i; i-- {
-		//fmt.Printf(" %s_%d block %d\n", alloc.procs[procIndex].Name, alloc.procs[procIndex].Id, i)
 		alloc.findLiveRanges(blocks[i].start)
 	}
 	// This is done last because with loops a jump's target may be
@@ -388,20 +361,28 @@ func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
 		block.connectJump()
 	}
 
-	vars := alloc.allVars.Members()
 	// Sort the variables to get deterministic behavior.
-	sort.Slice(vars, func(i int, j int) bool {
-		return vars[i].Id < vars[j].Id
-	})
-
-	for _, vart := range vars {
+	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
 		printVarLinks(vart)
 	}
-	/*
-	for _, class := range classes {
-		alloc.allocateRegisterClass(class)
+
+	for _, block := range blocks {
+		for _, next := range block.next {
+			if next.startIndex <= block.startIndex {
+				panic("register allocation does not handle loops yet")
+			}
+		}
 	}
-	*/
+	alloc.mergeChains()
+	for _, class := range classes {
+		alloc.colorChains(class)
+	}
+	moves := alloc.findMoves()
+	if len(moves) != 0 {
+		link := moves[0][0]
+		panic(fmt.Sprintf("register allocation does not insert moves yet, %d needed, first is for %s at link %d",
+			len(moves), link.variable, link.id))
+	}
 }
 
 // Returns the blocks reachable from 'start' in reverse postorder.
@@ -434,7 +415,9 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	// link at the start of each next block.
 	block.liveLinks = map[*VariableT]*liveLinkT{}
 	for _, next := range block.next {
-		for vart, nextLiveLink := range next.liveLinks {
+		// Sort the variables to get deterministic behavior.
+		for _, vart := range sortedVars(maps.Keys(next.liveLinks)) {
+			nextLiveLink := next.liveLinks[vart]
 			liveLink := block.liveLinks[vart]
 			if liveLink == nil {
 				link := &linkT{id: nextLinkId(), variable: vart}
@@ -448,9 +431,6 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	callIndex := block.callCount - 1
 	lateIndex := block.endIndex - 1
 	for call := block.end; 0 <= callIndex ; call = call.parent {
-		// fmt.Printf("call %d(%s) %d lateIndex %d\n",
-		//     call.Id, call.Primop.Name(), len(call.Outputs), lateIndex)
-
 		for i, spec := range block.outputSpecs[callIndex] {
 			if spec == nil {
 				continue
@@ -465,7 +445,8 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			delete(block.liveLinks, vart)
 		}
 
-		for vart, input := range getInputs(call, block.inputSpecs[callIndex]) {
+		for _, input := range getInputs(call, block.inputSpecs[callIndex]) {
+			vart := input.variable
 			start := lateIndex + EarlyRegUse
 			end := lateIndex + input.phaseOffset + 1 // +1 for inclusive to exclusive
 			liveLink := block.liveLinks[vart]
@@ -485,6 +466,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 		lateIndex -= 2
 	}
 
+	// Each has its own link, so the order does not matter.
 	for _, liveLink := range block.liveLinks {
 		// They are equal if the variable is used early in the first call.
 		if block.startIndex < liveLink.endIndex {
@@ -514,17 +496,23 @@ func (block *regBlockT) connectJump() {
 	}
 }
 
+func sortedVars(vars iter.Seq[*VariableT]) []*VariableT {
+	return slices.SortedFunc(vars, func(x, y *VariableT) int { return x.Id - y.Id })
+}
+
 // A call may have more than one reference to a variable, so we
-// collect the uses of each variable in a call's inputs.
+// collect the uses of each variable in a call's inputs.  These are
+// in the order in which the variables first appear.
 
 type callInputT struct {
+	variable    *VariableT
 	class       *RegisterClassT
 	phaseOffset int   // maximum phase offset of all uses
 	argIndexes  []int  // indexes into the call's inputs
 }
 
-func getInputs(call *CallNodeT, specs []*RegUseSpecT) map[*VariableT]*callInputT {
-	result := map[*VariableT]*callInputT{}
+func getInputs(call *CallNodeT, specs []*RegUseSpecT) []*callInputT {
+	result := []*callInputT{}
 	for i, spec := range specs {
 		if spec == nil {
 			continue
@@ -534,10 +522,13 @@ func getInputs(call *CallNodeT, specs []*RegUseSpecT) map[*VariableT]*callInputT
 			panic("got register spec for non-reference " + CallString(call))
 		}
 		vart := input.(*ReferenceNodeT).Variable
-		callInput := result[vart]
-		if callInput == nil {
-			result[vart] = &callInputT{spec.Class, spec.PhaseOffset, []int{i}}
+		index := slices.IndexFunc(result, func(input *callInputT) bool {
+			return input.variable == vart
+		})
+		if index < 0 {
+			Push(&result, &callInputT{vart, spec.Class, spec.PhaseOffset, []int{i}})
 		} else {
+			callInput := result[index]
 			callInput.phaseOffset = max(callInput.phaseOffset, spec.PhaseOffset)
 			Push(&callInput.argIndexes, i)
 		}
@@ -566,34 +557,4 @@ func (alloc *allocatorT) addAnchorLink(
 	}
 	alloc.allChains.Add(newChain(link, class))
 	return link
-}
-
-//----------------------------------------------------------------
-
-type pathT struct {
-	id int
-	class *RegisterClassT
-	from *linkT
-	to *linkT
-	links []*linkT
-	length int // sum of program points for the links
-	loopDepth int
-}
-
-var nextPathIdx = -1
-
-func nextPathId () int {
-	nextPathIdx += 1
-	return nextPathIdx
-}
-
-//----------------------------------------------------------------
-
-func getCalledProc(call *CallNodeT) *CallNodeT {
-	switch primop := call.Primop.(type) {
-	case CallsProcPrimopT:
-		return primop.CalledProc(call)
-	default:
-		return nil
-	}
 }

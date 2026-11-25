@@ -59,6 +59,8 @@ type testPrimopT struct {
 
 func (primop testPrimopT) Name() string { return primop.name }
 
+var testClass = &RegisterClassT{Name: "test"}
+
 // All inputs have the same phase, as do all outputs.
 func (block *regBlockT) addTestCall(
 	inputs []*VariableT,
@@ -66,7 +68,7 @@ func (block *regBlockT) addTestCall(
 	outputs []*VariableT,
 	outputPhase int,
 ) {
-	class := &RegisterClassT{Name: "test"}
+	class := testClass
 	call := &CallNodeT{Primop: testPrimopT{name: "test"}, Outputs: outputs}
 	var inputSpecs, outputSpecs []*RegUseSpecT
 	for _, vart := range inputs {
@@ -238,6 +240,13 @@ func TestFindLiveRangesBranches(t *testing.T) {
 			}
 			collect(x.definition)
 
+			previous := make([]int, len(blocks)) // number of previous blocks
+			for _, nexts := range test.next {
+				for _, next := range nexts {
+					previous[next] += 1
+				}
+			}
+
 			for _, link := range links {
 				if link.chain != nil {
 					continue
@@ -252,9 +261,9 @@ func TestFindLiveRangesBranches(t *testing.T) {
 					}
 					// X is live at the end of every previous block.
 					if interval.start == blocks[i].startIndex &&
-						len(link.starts) != len(blocks[i].previous) {
+						len(link.starts) != previous[i] {
 						t.Errorf("link at %d has %d starts, expected %d",
-							interval.start, len(link.starts), len(blocks[i].previous))
+							interval.start, len(link.starts), previous[i])
 					}
 				}
 			}
