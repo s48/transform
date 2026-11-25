@@ -32,7 +32,10 @@
 // Links end at the end of a basic block and are connected to the
 // links for the same variable at the start of the following blocks.
 // Thus there are no parallel links: at each program point a variable
-// has at most one link.  Jump arguments are connected to the outputs
+// has at most one link.  The exception is a variable that is live in a
+// loop but not referenced in it.  It has a single link that covers the
+// entire loop, or the outermost such loop if there are several, which
+// is considered to be outside the loop.  Jump arguments are connected to the outputs
 // of the JumpLambda by links that contain no program points.  When
 // all links have been added you can follow the links from a variable's
 // definition to all of its references.  The combined live ranges of
@@ -48,10 +51,12 @@
 // is only added to a tree once, so the number of paths does not
 // matter.  Searches are ordered by the depth of their shallowest leaf,
 // in units of program points, with shallower ones having priority over
-// deeper ones.  Links from jump arguments to outputs come after all
-// others.  They have no length and would otherwise come first, which
-// can keep an argument that is live after the jump from being merged
-// with the rest of its own variable.
+// deeper ones.  Links in inner loops come before those in outer ones, as
+// good allocation is more important there.  Within a loop, links from
+// jump arguments to outputs come after all others.  They have no length
+// and would otherwise come first, which can keep an argument that is
+// live after the jump from being merged with the rest of its own
+// variable.
 //
 // The algorithm progresses by removing the first search and extending
 // it along its shallowest leaf.  If this reaches a chain, possibly the
@@ -68,9 +73,11 @@
 // none of their live ranges overlap and doing so meets the
 // neighbor-count criteria.  The neighbors of a chain are the chains
 // whose live ranges overlap its own.  If there are N registers then
-// the result must have fewer than N neighbors that have N or more
-// neighbors themselves, with all of these counted as they will be
-// after the merge.  If no merge is possible then something needs to be
+// a neighbor is significant if it has N or more neighbors itself, with
+// all of these counted as they will be after the merge.  The result
+// must either have fewer than N significant neighbors (Briggs) or have
+// all of its significant neighbors already be neighbors of one of the
+// chains being merged (George).  If no merge is possible then something needs to be
 // spilled, which is not implemented.  The criteria are conservative, so
 // it may be that no spill was actually required.
 //
@@ -80,10 +87,9 @@
 // connects to one in a chain with a different register.  The moves for
 // jump arguments are done by the jump.  Other moves are not implemented.
 //
-// That should be enough to allocate registers for loop-free procedures
-// where there are sufficient register to avoid any spilling.  I would
-// like to get that much working before addressing procedures with
-// loops and/or ones that require spilling.
+// That should be enough to allocate registers for procedures where
+// there are sufficient registers to avoid any spilling.  I would like to
+// get that much working before addressing ones that require spilling.
 
 package cps
 
@@ -134,6 +140,7 @@ type linkT struct {
 	ends       []*linkT
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
+	loopDepth  int       // depth of the innermost loop containing the link
 }
 
 var nextLinkIdx = -1
@@ -247,9 +254,11 @@ type regBlockT struct {
 	next       []*regBlockT
 
 	seen       bool
-
+	loop       *regLoopT            // innermost loop containing this block, if any
+	liveIn     util.SetT[*VariableT] // variables live at the start of the block
 	jumpLinks []*linkT              // links for jump arguments at end
-	liveLinks map[*VariableT]*liveLinkT
+	liveLinks map[*VariableT]*liveLinkT // when done these are for the start of the block
+	endLinks  map[*VariableT]*linkT     // links live at the end of the block
 	inputSpecs  [][]*RegUseSpecT // cached for each call in the block
 	outputSpecs [][]*RegUseSpecT
 }
@@ -352,27 +361,13 @@ func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
 	}
 
 	alloc.numProgramPoints = index
-	for i := len(blocks) - 1; 0 <= i; i-- {
-		alloc.findLiveRanges(blocks[i].start)
-	}
-	// This is done last because with loops a jump's target may be
-	// processed after the jump.
-	for _, block := range blocks {
-		block.connectJump()
-	}
+	alloc.makeLinks(blocks)
 
 	// Sort the variables to get deterministic behavior.
 	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
 		printVarLinks(vart)
 	}
 
-	for _, block := range blocks {
-		for _, next := range block.next {
-			if next.startIndex <= block.startIndex {
-				panic("register allocation does not handle loops yet")
-			}
-		}
-	}
 	alloc.mergeChains()
 	for _, class := range classes {
 		alloc.colorChains(class)
@@ -407,24 +402,36 @@ func orderBlocks(start *regBlockT) []*regBlockT {
 	return blocks
 }
 
+// The blocks must be in the order returned by orderBlocks.
+
+func (alloc *allocatorT) makeLinks(blocks []*regBlockT) {
+	findLiveIn(blocks)
+	makeLoopLinks(blocks)
+	for _, block := range slices.Backward(blocks) {
+		alloc.findLiveRanges(block.start)
+	}
+	// These are done last because with loops a block's next block may be
+	// processed after the block.
+	for _, block := range blocks {
+		block.connectNext()
+		block.connectJump()
+	}
+}
+
 func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	block := top.Block.(*regBlockT)
 	fmt.Printf("block %s_%d [%d, %d)\n", block.start.Name, block.start.Id, block.startIndex, block.endIndex)
 	// Links do not cross block boundaries.  Each variable that is live
-	// at the end of the block gets a new link, connected to the variable's
-	// link at the start of each next block.
+	// at the end of the block gets a new link, which is connected to the
+	// following blocks in connectNext.
 	block.liveLinks = map[*VariableT]*liveLinkT{}
-	for _, next := range block.next {
-		// Sort the variables to get deterministic behavior.
-		for _, vart := range sortedVars(maps.Keys(next.liveLinks)) {
-			nextLiveLink := next.liveLinks[vart]
-			liveLink := block.liveLinks[vart]
-			if liveLink == nil {
-				link := &linkT{id: nextLinkId(), variable: vart}
-				liveLink = &liveLinkT{endIndex: block.endIndex, link: link}
-				block.liveLinks[vart] = liveLink
-			}
-			joinLinks(liveLink.link, nextLiveLink.link)
+	block.endLinks = map[*VariableT]*linkT{}
+	// Sort the variables to get deterministic behavior.
+	for _, vart := range sortedVars(maps.Keys(block.liveOut())) {
+		if block.loop.link(vart) == nil {
+			link := block.makeLink(vart)
+			block.liveLinks[vart] = &liveLinkT{endIndex: block.endIndex, link: link}
+			block.endLinks[vart] = link
 		}
 	}
 
@@ -458,7 +465,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 					block.jumpLinks[index - 1] = link
 				}
 			}
-			connectLink := &linkT{id: nextLinkId(), variable: vart}
+			connectLink := block.makeLink(vart)
 			joinLinks(connectLink, link)
 			block.liveLinks[vart] = &liveLinkT{endIndex: start, link: connectLink}
 		}
@@ -471,6 +478,34 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 		// They are equal if the variable is used early in the first call.
 		if block.startIndex < liveLink.endIndex {
 			liveLink.link.liveRange.add(intervalT{block.startIndex, liveLink.endIndex})
+		}
+	}
+}
+
+func (block *regBlockT) makeLink(vart *VariableT) *linkT {
+	return &linkT{id: nextLinkId(), variable: vart, loopDepth: block.loop.depth()}
+}
+
+// Connect the links at the end of this block to those at the starts of
+// the next ones.
+
+func (block *regBlockT) connectNext() {
+	for _, next := range block.next {
+		for _, vart := range sortedVars(maps.Keys(next.liveIn)) {
+			from := block.loop.link(vart)
+			if from == nil {
+				from = block.endLinks[vart]
+			}
+			to := next.loop.link(vart)
+			if to == nil {
+				to = next.liveLinks[vart].link
+			}
+			// They are the same if this is within a loop that does not
+			// reference the variable, and a loop may have several exits to
+			// the same block.
+			if from != to && !slices.Contains(from.ends, to) {
+				joinLinks(from, to)
+			}
 		}
 	}
 }
@@ -490,7 +525,8 @@ func (block *regBlockT) connectJump() {
 		if argument == nil || output == nil {
 			continue
 		}
-		connectLink := &linkT{id: nextLinkId(), variable: argument.variable}
+		connectLink := block.makeLink(argument.variable)
+		connectLink.loopDepth = commonLoop(block, target.Block.(*regBlockT)).depth()
 		joinLinks(argument, connectLink)
 		joinLinks(connectLink, output)
 	}

@@ -140,8 +140,7 @@ func TestFindLiveRangesBoundary(t *testing.T) {
 				allVars:   util.NewSet[*VariableT](),
 				allChains: util.NewSet[*chainT](),
 			}
-			alloc.findLiveRanges(second.start)
-			alloc.findLiveRanges(first.start)
+			alloc.makeLinks([]*regBlockT{first, second})
 
 			xExpected := intervals(3+outputPhase, 5+inputPhase+1)
 			xPoints := variablePoints(t, x)
@@ -215,9 +214,7 @@ func TestFindLiveRangesBranches(t *testing.T) {
 				allVars:   util.NewSet[*VariableT](),
 				allChains: util.NewSet[*chainT](),
 			}
-			for _, block := range slices.Backward(blocks) {
-				alloc.findLiveRanges(block.start)
-			}
+			alloc.makeLinks(blocks)
 
 			points := variablePoints(t, x)
 			if !slices.Equal(points, test.expected) {
@@ -353,12 +350,7 @@ func TestConnectJump(t *testing.T) {
 		allVars:   util.NewSet[*VariableT](),
 		allChains: util.NewSet[*chainT](),
 	}
-	for _, block := range slices.Backward(blocks) {
-		alloc.findLiveRanges(block.start)
-	}
-	for _, block := range blocks {
-		block.connectJump()
-	}
+	alloc.makeLinks(blocks)
 
 	aLink := a.uses[entry.end.Inputs[1]]
 	pLink := p.uses[back.end.Inputs[2]]

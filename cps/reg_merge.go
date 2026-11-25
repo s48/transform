@@ -20,10 +20,12 @@ import (
 // the first was added.  Each chain with such links below it has a search.
 // Every link has some chain above it, so this reaches all of them.
 //
-// Links from jump arguments to outputs come after all others.  They have
-// no length, so otherwise they would come first, and merging an argument
-// that is live after the jump with the output keeps the argument from
-// being merged with the rest of its own variable.
+// Links inside loops come before those outside, so that inner loops are
+// done before outer ones.  Within a loop, links from jump arguments to
+// outputs come after all others.  They have no length, so otherwise they
+// would come first, and merging an argument that is live after the jump
+// with the output keeps the argument from being merged with the rest of
+// its own variable.
 
 type searchT struct {
 	id        int
@@ -38,9 +40,13 @@ type searchLinkT struct {
 	parent *searchLinkT // nil if the link is next to the chain
 	depth  int          // program points in this and all its parents
 	jump   bool         // this connects a jump's argument and output
+	loop   int          // minimum loop depth of this and all its parents
 }
 
 func (x *searchLinkT) isShorter(y *searchLinkT) bool {
+	if x.loop != y.loop {
+		return y.loop < x.loop // inner loops go first
+	}
 	if x.jump != y.jump {
 		return y.jump
 	}
@@ -69,8 +75,9 @@ func (search *searchT) addLeaves(links []*linkT, parent *searchLinkT) {
 			continue
 		}
 		search.seen.Add(link)
-		leaf := &searchLinkT{link, parent, link.liveRange.size(), isJumpLink(link)}
+		leaf := &searchLinkT{link, parent, link.liveRange.size(), isJumpLink(link), link.loopDepth}
 		if parent != nil {
+			leaf.loop = min(leaf.loop, parent.loop)
 			leaf.depth += parent.depth
 		}
 		Push(&search.leaves, leaf)
@@ -248,8 +255,13 @@ func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 }
 
 // True if the chains, and a path with the given live range, can be merged
-// without keeping the result from being colored.  We need there to be
-// fewer than N neighbors that will themselves have N or more neighbors.
+// without keeping the result from being colored.  A neighbor of the
+// result is significant if it will have N or more neighbors itself.  Either
+// of two tests is sufficient:
+//   - Briggs: there are fewer than N significant neighbors.
+//   - George: every significant neighbor is already a neighbor of one
+//     particular chain.  The result is then no harder to color than that
+//     chain was.
 func (alloc *allocatorT) canMerge(
 	chains []*chainT,
 	live *liveRangeT,
@@ -272,7 +284,7 @@ func (alloc *allocatorT) canMerge(
 	for _, chain := range chains {
 		neighbors.AddSet(chain.conflicts)
 	}
-	count := 0
+	significant := []*chainT{}
 	for neighbor := range neighbors {
 		degree := len(neighbor.conflicts) + 1
 		for _, chain := range chains {
@@ -281,10 +293,17 @@ func (alloc *allocatorT) canMerge(
 			}
 		}
 		if class.numRegisters() <= degree {
-			count += 1
+			Push(&significant, neighbor)
 		}
 	}
-	return count < class.numRegisters()
+	if len(significant) < class.numRegisters() {
+		return true
+	}
+	return slices.ContainsFunc(chains, func(chain *chainT) bool {
+		return !slices.ContainsFunc(significant, func(neighbor *chainT) bool {
+			return !chain.conflicts.Contains(neighbor)
+		})
+	})
 }
 
 func (alloc *allocatorT) mergePath(

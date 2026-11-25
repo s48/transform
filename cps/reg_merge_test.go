@@ -45,12 +45,7 @@ func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
 		block.endIndex = index
 	}
 	alloc.numProgramPoints = index
-	for _, block := range slices.Backward(blocks) {
-		alloc.findLiveRanges(block.start)
-	}
-	for _, block := range blocks {
-		block.connectJump()
-	}
+	alloc.makeLinks(blocks)
 	alloc.mergeChains()
 	alloc.colorChains(testClass)
 	return alloc
@@ -213,9 +208,58 @@ func TestMergeJump(t *testing.T) {
 	}
 }
 
-// Random loop-free programs.  Blocks can only go to later blocks.
-func randomTestBlocks(random *rand.Rand, maxLive int) []*regBlockT {
-	count := 1 + random.Intn(8)
+// Make a random block go back to an earlier one, which must dominate it.
+func addTestLoop(random *rand.Rand, next [][]int) {
+	if len(next) < 4 {
+		return
+	}
+	latch := 2 + random.Intn(len(next)-3)
+	header := 1 + random.Intn(latch-1)
+	if next[latch][0] <= latch || next[latch-1][0] < latch {
+		return // already in use
+	}
+	oldLatch := next[latch]
+	oldPrevious := next[latch-1]
+	next[latch-1] = []int{latch, latch + 1}
+	next[latch] = []int{header}
+	if !isTestReducible(next) {
+		next[latch] = oldLatch
+		next[latch-1] = oldPrevious
+	}
+}
+
+// True if everything is reachable and back edges go to dominators.
+func isTestReducible(next [][]int) bool {
+	reachable := func(without int) []bool {
+		seen := make([]bool, len(next))
+		var visit func(i int)
+		visit = func(i int) {
+			if i != without && !seen[i] {
+				seen[i] = true
+				for _, j := range next[i] {
+					visit(j)
+				}
+			}
+		}
+		visit(0)
+		return seen
+	}
+	if slices.Contains(reachable(-1), false) {
+		return false
+	}
+	for i, nexts := range next {
+		for _, j := range nexts {
+			if j <= i && reachable(j)[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Without 'loops' blocks can only go to later blocks.
+func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*regBlockT {
+	count := 1 + random.Intn(size)
 	next := make([][]int, count)
 	jumpTarget := make([]bool, count) // all predecessors have just one next
 	for i := range count {
@@ -227,6 +271,11 @@ func randomTestBlocks(random *rand.Rand, maxLive int) []*regBlockT {
 			}
 		}
 		jumpTarget[i] = 0 < i && random.Intn(2) == 0
+	}
+	if loops {
+		for range 1 + random.Intn(3) {
+			addTestLoop(random, next)
+		}
 	}
 	for _, nexts := range next {
 		if len(nexts) != 1 {
@@ -324,7 +373,7 @@ func randomTestBlocks(random *rand.Rand, maxLive int) []*regBlockT {
 func TestMergeDeterministic(t *testing.T) {
 	describe := func(seed int) string {
 		setTestRegisters(5 + seed%4)
-		blocks := randomTestBlocks(rand.New(rand.NewSource(int64(seed))), 5)
+		blocks := randomTestBlocks(rand.New(rand.NewSource(int64(seed))), 10, 5, seed%2 == 0)
 		firstLink := nextLinkIdx
 		result := ""
 		alloc := (*allocatorT)(nil)
@@ -360,32 +409,142 @@ func TestMergeDeterministic(t *testing.T) {
 	}
 }
 
+// Run a program, checking that every register that is read contains the
+// right value.  Values are just distinct integers.
+func simulate(t *testing.T, random *rand.Rand, start *regBlockT, maxBlocks int) {
+	t.Helper()
+	registers := map[RegisterT]int{}
+	values := map[*VariableT]int{}
+	nextValue := 1
+	read := func(call *CallNodeT, i int) int {
+		vart := call.Inputs[i].(*ReferenceNodeT).Variable
+		value := registers[vart.ReferenceRegister(call.Inputs[i])]
+		if value != values[vart] {
+			t.Fatalf("%s_%d has the wrong value", vart.Name, vart.Id)
+		}
+		return value
+	}
+	write := func(vart *VariableT, value int) {
+		registers[vart.Register()] = value
+		values[vart] = value
+	}
+	arguments := []int{} // from the previous block's jump
+	block := start
+	for range maxBlocks {
+		for i, call := range block.calls() {
+			isJump := call.Primop.Name() == "jump"
+			jumpArguments := arguments
+			arguments = []int{}
+			for _, phase := range []int{EarlyRegUse, LateRegUse} {
+				for j, spec := range block.inputSpecs[i] {
+					if spec != nil && spec.PhaseOffset == phase {
+						value := read(call, j)
+						if isJump {
+							Push(&arguments, value)
+						}
+					}
+				}
+				for j, spec := range block.outputSpecs[i] {
+					if spec.PhaseOffset != phase {
+						continue
+					} else if len(jumpArguments) != 0 {
+						write(call.Outputs[j], jumpArguments[j])
+					} else {
+						write(call.Outputs[j], nextValue)
+						nextValue += 1
+					}
+				}
+			}
+		}
+		if len(block.next) == 0 {
+			return
+		}
+		block = block.next[random.Intn(len(block.next))]
+	}
+}
+
+// Every link, starting from those that are in chains.
+func allTestLinks(alloc *allocatorT) util.SetT[*linkT] {
+	links := util.NewSet[*linkT]()
+	var visit func(link *linkT)
+	visit = func(link *linkT) {
+		if !links.Contains(link) {
+			links.Add(link)
+			for _, next := range slices.Concat(link.starts, link.ends) {
+				visit(next)
+			}
+		}
+	}
+	for chain := range alloc.allChains {
+		for _, link := range chain.links {
+			visit(link)
+		}
+	}
+	return links
+}
+
+// No variable may have two links at a program point.
+func checkLinks(t *testing.T, alloc *allocatorT) {
+	t.Helper()
+	type pointT struct {
+		vart  *VariableT
+		point int
+	}
+	points := util.NewSet[pointT]()
+	for link := range allTestLinks(alloc) {
+		for _, interval := range link.liveRange.intervals {
+			for i := interval.start; i < interval.end; i++ {
+				point := pointT{link.variable, i}
+				if points.Contains(point) {
+					t.Fatalf("parallel links for %s_%d at %d", link.variable.Name, link.variable.Id, i)
+				}
+				points.Add(point)
+			}
+		}
+	}
+}
+
 func TestMergeRandom(t *testing.T) {
 	results := map[string]int{}
 	for seed := range 4000 {
 		registers := 3 + seed%6
 		setTestRegisters(registers)
 		random := rand.New(rand.NewSource(int64(seed)))
-		blocks := randomTestBlocks(random, registers)
+		loops := seed%4 != 0
+		blocks := orderBlocks(randomTestBlocks(random, 12, registers-1, loops)[0])
 		var problem any
 		var alloc *allocatorT
 		func() {
 			defer func() { problem = recover() }()
 			alloc = allocateTestBlocks(blocks)
 		}()
+		kind := "straight"
+		for _, block := range blocks {
+			if block.loop != nil {
+				kind = "loop"
+				if len(block.loop.links) != 0 {
+					kind = "loop with links"
+					break
+				}
+			}
+		}
 		if problem != nil {
 			message := fmt.Sprint(problem)
 			if strings.Contains(message, "spilling") {
-				results[fmt.Sprintf("%d spill", registers)] += 1
+				results[kind+" spill"] += 1
 				continue
 			}
 			t.Fatalf("seed %d: %s", seed, message)
 		}
+		checkLinks(t, alloc)
 		checkAllocation(t, alloc)
-		if len(alloc.findMoves()) == 0 {
-			results[fmt.Sprintf("%d no moves", registers)] += 1
-		} else {
-			results[fmt.Sprintf("%d moves", registers)] += 1
+		if len(alloc.findMoves()) != 0 {
+			results[kind+" moves"] += 1
+			continue
+		}
+		results[kind+" no moves"] += 1
+		for range 10 {
+			simulate(t, random, blocks[0], 60)
 		}
 	}
 	t.Logf("%v", results)
@@ -408,7 +567,7 @@ func TestMergeCancelsSearches(t *testing.T) {
 		allChains:        util.NewSet[*chainT](),
 		numProgramPoints: block.endIndex,
 	}
-	alloc.findLiveRanges(block.start)
+	alloc.makeLinks([]*regBlockT{block})
 	alloc.startMerge()
 	upper := vars[0].definition.chain
 	lower := vars[0].uses[firstUse].chain
@@ -434,5 +593,51 @@ func TestMergeCancelsSearches(t *testing.T) {
 	}
 	if upper.search == nil || upper.search.cancelled || lower.search != nil {
 		t.Errorf("merged chain should have the only search")
+	}
+}
+
+func TestCanMerge(t *testing.T) {
+	setTestRegisters(2)
+	makeChain := func(conflicts ...*chainT) *chainT {
+		chain := newChain(&linkT{}, testClass)
+		for _, other := range conflicts {
+			chain.conflicts.Add(other)
+			other.conflicts.Add(chain)
+		}
+		return chain
+	}
+	a := makeChain()
+	n1 := makeChain(a)
+	n2 := makeChain(a, n1) // n1 and n2 each have two neighbors
+	n3 := makeChain(n1, n2)
+	minor := makeChain()
+	alloc := &allocatorT{chainPoints: []util.SetT[*chainT]{
+		util.NewSet(n1),
+		util.NewSet(n3),
+		util.NewSet(minor),
+	}}
+	tests := []struct {
+		name     string
+		chains   []*chainT
+		live     *liveRangeT
+		expected bool
+	}{
+		// Two significant neighbors, n1 and n2, so this fails Briggs.
+		{"George", []*chainT{a}, liveRange(0, 1), true},
+		// Adds n3, which is not a neighbor of 'a'.
+		{"neither", []*chainT{a}, liveRange(1, 2), false},
+		// 'minor' is not a neighbor of 'a', but it is not significant.
+		{"George with insignificant neighbor", []*chainT{a}, liveRange(2, 3), true},
+		{"Briggs", nil, liveRange(0, 1), true},
+		{"merged neighbors", []*chainT{a, n3}, liveRange(2, 3), true},
+		{"conflicting chains", []*chainT{a, n1}, liveRange(2, 3), false},
+		{"nothing added", []*chainT{a}, liveRange(), true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if alloc.canMerge(test.chains, test.live, testClass) != test.expected {
+				t.Errorf("canMerge is not %v", test.expected)
+			}
+		})
 	}
 }
