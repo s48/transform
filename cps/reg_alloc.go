@@ -69,7 +69,7 @@
 // other, or with neither.  The search for the upper chain, and for the
 // path's chain if that is different, then start over.  The search for
 // any chain that was merged into another is cancelled.  Any other
-// search that comes across a link that is now in a chain also starts
+// search that was using a link that is now in a chain also starts
 // over.  Going down is sufficient to find all of the links, as every
 // link has some chain above it.  After a spill there may be links that
 // are only reachable through the spilled one.  These stay in memory, and
@@ -87,7 +87,8 @@
 //
 // If a path can't be added as a whole then the links in it are tried
 // individually, from the lower end up.  The first that can't be put in
-// a chain is spilled.  The links above it are left for other paths.  Any
+// a chain is spilled, along with any links above it that only lead to
+// spilled links.  Other links above it are left for other paths.  Any
 // link that never ends up in a chain is in memory.  There is no
 // backtracking.  The search priorities are intended to make the
 // link that does not get a register the right one to spill.
@@ -178,6 +179,7 @@ type linkT struct {
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
 	spilled    bool      // it cannot be in a chain
+	searches   []*searchT // searches that may be using this link
 	loopDepth  int       // depth of the innermost loop containing the link
 }
 

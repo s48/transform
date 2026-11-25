@@ -28,29 +28,31 @@ import (
 // variable.
 
 type searchT struct {
-	id        int
+	id        int     // used for making sorts deterministic
 	chain     *chainT // nil if this starts from a link
 	root      *linkT  // the link, if there is no chain
 	leaves    []*searchLinkT
+	shortest  int               // index of the leaf to extend next
 	seen      util.SetT[*linkT] // every link that is or has been a leaf
 	cancelled bool              // may still be in the queue
 }
 
 type searchLinkT struct {
-	constant bool // the path here has a constant's link
-	link     *linkT
-	parent   *searchLinkT // nil if the link is next to the chain
-	depth    int          // program points in this and all its parents
-	jump     bool         // the path here goes from an argument to an output
-	loop     int          // minimum loop depth of this and all its parents
+	constant  bool // the path here has a constant's link
+	link      *linkT
+	parent    *searchLinkT // nil if the link is next to the chain
+	depth     int          // program points in this and all its ancestors
+	jump      bool         // the path here goes from an argument to an output
+	loopDepth int          // minimum loop depth of this and all its ancestors
 }
 
+// True if x is shorter than y, meaning that x should be extended first.
 func (x *searchLinkT) isShorter(y *searchLinkT) bool {
 	if x.constant != y.constant {
 		return y.constant
 	}
-	if x.loop != y.loop {
-		return y.loop < x.loop // inner loops go first
+	if x.loopDepth != y.loopDepth {
+		return y.loopDepth < x.loopDepth // inner loops go first
 	}
 	if x.jump != y.jump {
 		return y.jump
@@ -68,13 +70,14 @@ func nextSearchId() int {
 // Start over, with only the links directly below the chain.
 func (search *searchT) restart() {
 	search.leaves = nil
+	search.shortest = 0
 	search.seen = util.NewSet[*linkT]()
 	if search.chain == nil {
 		search.addLeaf(search.root, nil, false)
-		return
-	}
-	for _, link := range search.chain.links {
-		search.addLeaves(link, nil)
+	} else {
+		for _, link := range search.chain.links {
+			search.addLeaves(link, nil)
+		}
 	}
 }
 
@@ -91,54 +94,60 @@ func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
 	}
 	search.seen.Add(link)
 	leaf := &searchLinkT{
-		link:     link,
-		parent:   parent,
-		constant: link.variable.constant() != nil,
-		depth:    link.liveRange.size(),
-		jump:     jump,
-		loop:     link.loopDepth,
+		link:      link,
+		parent:    parent,
+		constant:  link.variable.constant() != nil,
+		depth:     link.liveRange.size(),
+		jump:      jump,
+		loopDepth: link.loopDepth,
 	}
 	if parent != nil {
 		leaf.constant = leaf.constant || parent.constant
 		leaf.depth += parent.depth
 		leaf.jump = leaf.jump || parent.jump
-		leaf.loop = min(leaf.loop, parent.loop)
+		leaf.loopDepth = min(leaf.loopDepth, parent.loopDepth)
 	}
 	Push(&search.leaves, leaf)
+	Push(&link.searches, search)
+	if leaf.isShorter(search.leaves[search.shortest]) {
+		search.shortest = len(search.leaves) - 1
+	}
 }
 
-// The index of the leaf to extend next.
-func (search *searchT) shortestLeaf() int {
-	best := 0
-	for i, leaf := range search.leaves {
-		if leaf.isShorter(search.leaves[best]) {
-			best = i
+// Remove and return the shortest leaf.
+func (search *searchT) removeShortest() *searchLinkT {
+	leaves := search.leaves
+	leaf := leaves[search.shortest]
+	last := len(leaves) - 1
+	leaves[search.shortest] = leaves[last]
+	search.leaves = leaves[:last]
+	search.shortest = 0
+	for i, other := range search.leaves {
+		if other.isShorter(search.leaves[search.shortest]) {
+			search.shortest = i
 		}
 	}
-	return best
+	return leaf
 }
 
 // Extends the search along the shortest leaf.  If that reaches a chain
 // this returns the path and the chain, otherwise it returns nil.
 func (search *searchT) extend() ([]*linkT, *chainT) {
-	i := search.shortestLeaf()
-	leaf := search.leaves[i]
-	search.leaves = slices.Delete(search.leaves, i, i+1)
-	path := []*linkT{}
-	for branch := leaf; branch != nil; branch = branch.parent {
-		if branch.link.chain != nil || branch.link.spilled {
-			// Some other search has been using our links.
-			search.restart()
-			return nil, nil
-		}
-		Push(&path, branch.link)
-	}
+	leaf := search.removeShortest()
 	for _, end := range leaf.link.ends {
 		lower := end.chain.root()
-		if lower != nil && (search.chain == nil || lower.class == search.chain.class) {
-			slices.Reverse(path)
-			return path, lower
+		if lower == nil {
+			continue
 		}
+		if search.chain != nil && lower.class != search.chain.class {
+			panic("link between chains with different register classes")
+		}
+		path := []*linkT{}
+		for branch := leaf; branch != nil; branch = branch.parent {
+			Push(&path, branch.link)
+		}
+		slices.Reverse(path)
+		return path, lower
 	}
 	search.addLeaves(leaf.link, leaf)
 	return nil, nil
@@ -150,8 +159,8 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 func (alloc *allocatorT) startMerge() {
 	// The queue returns the greatest element first.
 	alloc.searchQueue = util.MakePriorityQueue(func(x *searchT, y *searchT) bool {
-		xLeaf := x.leaves[x.shortestLeaf()]
-		yLeaf := y.leaves[y.shortestLeaf()]
+		xLeaf := x.leaves[x.shortest]
+		yLeaf := y.leaves[y.shortest]
 		if xLeaf.isShorter(yLeaf) {
 			return false
 		} else if yLeaf.isShorter(xLeaf) {
@@ -184,6 +193,7 @@ func (alloc *allocatorT) mergeChains() {
 		}
 		path, lower := search.extend()
 		if path != nil {
+			search.cancelled = true // a new one is started if needed
 			alloc.addPath(search.chain, lower, path)
 			if search.chain == nil {
 				// Does nothing if the link is now in a chain.
@@ -238,6 +248,39 @@ func (alloc *allocatorT) liveChains(live *liveRangeT, class *RegisterClassT) uti
 	return result
 }
 
+// These links are no longer available.  Any searches that are using them
+// have to start over.
+//
+// The alternative is to not do this and instead have extend() start over if
+// the path it is extending has a link that is no longer available.  That is
+// simpler and, on random programs, results in different but equally good
+// allocations.  The utility of doing it here should be reexamined when there
+// is a more representative sample of code to test it on.
+func (alloc *allocatorT) removeFromSearches(links []*linkT) {
+	for _, link := range links {
+		for _, search := range link.searches {
+			if !search.cancelled && search.seen.Contains(link) {
+				alloc.restartSearch(search)
+			}
+		}
+		link.searches = nil
+	}
+}
+
+func (alloc *allocatorT) restartSearch(search *searchT) {
+	oldLeaves := search.leaves
+	oldShortest := search.shortest
+	search.restart()
+	if len(search.leaves) == 0 {
+		// The queue may still need to be able to compare it with others.
+		search.leaves = oldLeaves
+		search.shortest = oldShortest
+		search.cancelled = true
+	} else {
+		alloc.searchQueue.Update(search)
+	}
+}
+
 // Start or restart the search down from a chain.
 func (alloc *allocatorT) startSearch(chain *chainT) {
 	chain.cancelSearch()
@@ -269,8 +312,7 @@ func (chain *chainT) cancelSearch() {
 // connects as possible.  If it cannot be added as a whole we go up from
 // the lower chain, adding links individually, at the cost of some moves.
 // If we get to one that can't be added then it is spilled.  Any links
-// above that are left for other paths.  If there aren't any then there is
-// no reason for them to be in registers.
+// above that are left for other paths, if there may be any.
 func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 	if alloc.addLinks(upper, lower, path) != nil {
 		return
@@ -282,13 +324,26 @@ func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 		}
 		lower = alloc.addLinks(above, lower, path[i:i+1])
 		if lower == nil {
-			link.spilled = true
+			alloc.spill(link)
 			break
 		}
 		upper = upper.root()
 	}
 	if upper != nil {
 		alloc.startSearch(upper)
+	}
+}
+
+// Spill a link and any links above it that only lead to spilled links, as
+// there is no reason for those to be in registers.
+func (alloc *allocatorT) spill(link *linkT) {
+	link.spilled = true
+	alloc.removeFromSearches([]*linkT{link})
+	for _, start := range link.starts {
+		if start.chain == nil && !start.spilled &&
+			!slices.ContainsFunc(start.ends, func(end *linkT) bool { return !end.spilled }) {
+			alloc.spill(start)
+		}
 	}
 }
 
@@ -379,6 +434,9 @@ func (alloc *allocatorT) canMerge(
 	})
 }
 
+// Merge the chains and the path into a single chain, which is returned.  If
+// there are no chains then a new one is made for the path.  'live' is the
+// live range of the path.
 func (alloc *allocatorT) mergePath(
 	chains []*chainT,
 	path []*linkT,
@@ -386,10 +444,11 @@ func (alloc *allocatorT) mergePath(
 	class *RegisterClassT,
 ) *chainT {
 	var chain *chainT
+	unadded := path
 	if len(chains) == 0 {
 		chain = newChain(path[0], class)
 		alloc.allChains.Add(chain)
-		path = path[1:]
+		unadded = path[1:]
 	} else {
 		chain = chains[0]
 	}
@@ -404,10 +463,11 @@ func (alloc *allocatorT) mergePath(
 		chain.merge(other)
 		alloc.allChains.Remove(other)
 	}
-	for _, link := range path {
+	for _, link := range unadded {
 		chain.addLink(link)
 	}
 	alloc.addConflicts(chain, live)
+	alloc.removeFromSearches(path)
 	return chain
 }
 

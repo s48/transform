@@ -209,3 +209,37 @@ func TestUnusedOutputs(t *testing.T) {
 		}
 	}
 }
+
+// Link a leads to b and c, b and c to d, and c also to e.
+func TestSpillUp(t *testing.T) {
+	setTestRegisters(2)
+	vart := &VariableT{Name: "v"}
+	links := make([]*linkT, 5)
+	for i := range links {
+		links[i] = &linkT{id: i, variable: vart}
+	}
+	a, b, c, d, e := links[0], links[1], links[2], links[3], links[4]
+	top := newChain(&linkT{variable: vart}, testClass)
+	joinLinks(top.links[0], a)
+	joinLinks(a, b)
+	joinLinks(a, c)
+	joinLinks(b, d)
+	joinLinks(c, d)
+	joinLinks(c, e)
+	expectSpilled := func(expected ...*linkT) {
+		t.Helper()
+		for _, link := range links {
+			if link.spilled != slices.Contains(expected, link) {
+				t.Errorf("link %d: spilled is %v", link.id, link.spilled)
+			}
+		}
+	}
+	alloc := &allocatorT{}
+	alloc.spill(d)
+	expectSpilled(d, b) // c may be used to get to e
+	alloc.spill(e)
+	expectSpilled(a, b, c, d, e)
+	if top.links[0].spilled {
+		t.Errorf("links in chains should not be spilled")
+	}
+}

@@ -259,7 +259,7 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 			}
 			finder.addBefore(call, finder.movesBetween(live, point-1, point))
 		}
-		stores := finder.findStores(block, i)
+		stores := finder.findStores(call, block.outputSpecs[i])
 		if i != len(calls)-1 {
 			finder.addBefore(calls[i+1], stores)
 		} else {
@@ -296,16 +296,15 @@ func (finder *moveFinderT) movesBetween(vars util.SetT[*VariableT], from int, to
 	return moves
 }
 
-// Stores for the outputs of the i'th call in the block.
-func (finder *moveFinderT) findStores(block *regBlockT, i int) []RegMoveT {
-	call := block.calls()[i]
+// Stores for the outputs of a call.
+func (finder *moveFinderT) findStores(call *CallNodeT, specs []*RegUseSpecT) []RegMoveT {
 	stores := []RegMoveT{}
 	if call.CallType == JumpLambda {
 		return stores // done by the jump
 	}
-	for j, spec := range block.outputSpecs[i] {
+	for i, spec := range specs {
 		if spec != nil {
-			vart := call.Outputs[j]
+			vart := call.Outputs[i]
 			slot, found := finder.slots[vart]
 			if found {
 				register := vart.definition.chain.root().Register
