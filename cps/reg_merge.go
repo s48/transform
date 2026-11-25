@@ -228,30 +228,51 @@ func (chain *chainT) cancelSearch() {
 }
 
 // Add the path to a chain.  We merge it with as many of the chains it
-// connects as possible.
+// connects as possible.  If it cannot be added as a whole we try adding
+// the links individually, at the cost of some moves.
 func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
+	if alloc.addLinks(upper, lower, path) != nil {
+		return
+	}
+	for i := range path {
+		next := lower
+		if i != len(path)-1 {
+			next = nil
+		}
+		upper = alloc.addLinks(upper, next, path[i:i+1])
+		if upper == nil {
+			panic(fmt.Sprintf("no register available for variable %s, spilling is not implemented",
+				path[i].variable))
+		}
+		lower = lower.root()
+	}
+}
+
+// Add the links to a chain, merged with one or both of 'upper' and 'lower',
+// or with neither.  'lower' is nil if the links do not lead to a chain.
+// Returns the chain, or nil if this can't be done.
+func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) *chainT {
 	live := &liveRangeT{}
-	for _, link := range path {
+	for _, link := range links {
 		live = live.union(&link.liveRange)
 	}
 	choices := [][]*chainT{{upper, lower}, {upper}, {lower}, {}}
-	if upper == lower {
+	if upper == lower || lower == nil {
 		choices = [][]*chainT{{upper}, {}}
 	}
 	for _, chains := range choices {
 		if alloc.canMerge(chains, live, upper.class) {
-			chain := alloc.mergePath(chains, path, live, upper.class)
+			chain := alloc.mergePath(chains, links, live, upper.class)
 			// The links below these may have changed.  The lower chain is
 			// unchanged if it was not merged.
 			alloc.startSearch(upper.root())
 			if chain != upper.root() {
 				alloc.startSearch(chain)
 			}
-			return
+			return chain
 		}
 	}
-	panic(fmt.Sprintf("no register available for variable %s, spilling is not implemented",
-		path[0].variable))
+	return nil
 }
 
 // True if the chains, and a path with the given live range, can be merged
@@ -389,24 +410,6 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 		}
 		chain.Register = class.firstRegister(available)
 	}
-}
-
-// Returns pairs of connected links that are in different registers.
-// Moves for jump arguments are done by the jump itself and so are not
-// included.
-func (alloc *allocatorT) findMoves() [][2]*linkT {
-	moves := [][2]*linkT{}
-	for _, chain := range alloc.sortedChains() {
-		for _, link := range chain.links {
-			for _, end := range link.ends {
-				if chain.Register != end.chain.root().Register &&
-					!isJumpLink(link) && !isJumpLink(end) {
-					Push(&moves, [2]*linkT{link, end})
-				}
-			}
-		}
-	}
-	return moves
 }
 
 // Links between a jump's arguments and the JumpLambda's outputs.

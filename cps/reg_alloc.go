@@ -84,8 +84,12 @@
 // Once all links are in chains they are assigned registers using the
 // usual graph coloring algorithm, which the criteria ensure will
 // succeed.  Moves then need to be inserted wherever a link in one chain
-// connects to one in a chain with a different register.  The moves for
-// jump arguments are done by the jump.  Other moves are not implemented.
+// connects to one in a chain with a different register.  These moves
+// always come between calls, as any link that begins or ends within a
+// call is the start or end of a value.  The moves are returned in a map
+// from calls to the moves that have to happen there.  Moves between
+// blocks are done either as part of a jump or, following a conditional,
+// before the first call in the next block.
 //
 // That should be enough to allocate registers for procedures where
 // there are sufficient registers to avoid any spilling.  I would like to
@@ -339,17 +343,25 @@ type allocatorT struct {
 	searchQueue *util.PriorityQueueT[*searchT]
 }
 
-func AllocateRegisters(top *CallNodeT, classes ...*RegisterClassT) {
+// Returns the register moves needed at each call.
+
+func AllocateRegisters(
+	top *CallNodeT,
+	classes ...*RegisterClassT,
+) map[*CallNodeT]*RegMovesT {
 	makeVarsForLiterals()
 	allocator := &allocatorT{
 		allVars: util.NewSet[*VariableT](),
 		allChains: util.NewSet[*chainT](),
 	}
 	PpCps(top)
-	allocator.allocate(top, classes)
+	return allocator.allocate(top, classes)
 }
 
-func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
+func (alloc *allocatorT) allocate(
+	top *CallNodeT,
+	classes []*RegisterClassT,
+) map[*CallNodeT]*RegMovesT {
 	top.SetFlag(1)
 	FindBasicBlocks[*regBlockT](top, makeRegBlock)
 	blocks := orderBlocks(top.Block.(*regBlockT))
@@ -372,12 +384,7 @@ func (alloc *allocatorT) allocate(top *CallNodeT, classes []*RegisterClassT) {
 	for _, class := range classes {
 		alloc.colorChains(class)
 	}
-	moves := alloc.findMoves()
-	if len(moves) != 0 {
-		link := moves[0][0]
-		panic(fmt.Sprintf("register allocation does not insert moves yet, %d needed, first is for %s at link %d",
-			len(moves), link.variable, link.id))
-	}
+	return alloc.findMoves(blocks)
 }
 
 // Returns the blocks reachable from 'start' in reverse postorder.
@@ -457,6 +464,11 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			start := lateIndex + EarlyRegUse
 			end := lateIndex + input.phaseOffset + 1 // +1 for inclusive to exclusive
 			liveLink := block.liveLinks[vart]
+			if liveLink != nil || call.Primop.Name() == "jump" {
+				// Cover the entire call if the value is needed after it.
+				// This ensures that moves are only needed between calls.
+				end = lateIndex + 1
+			}
 			link := alloc.addAnchorLink(vart, start, end, input.class, liveLink)
 			for _, index := range input.argIndexes {
 				vart.addUse(call.Inputs[index], link)

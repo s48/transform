@@ -5,6 +5,7 @@ package cps
 
 import (
 	"fmt"
+	"maps"
 	"math/rand"
 	"slices"
 	"strconv"
@@ -33,7 +34,7 @@ func setTestRegisters(count int) {
 }
 
 // The blocks must be in reverse postorder.
-func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
+func newTestAllocator(blocks []*regBlockT) *allocatorT {
 	alloc := &allocatorT{
 		allVars:   util.NewSet[*VariableT](),
 		allChains: util.NewSet[*chainT](),
@@ -45,6 +46,11 @@ func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
 		block.endIndex = index
 	}
 	alloc.numProgramPoints = index
+	return alloc
+}
+
+func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
+	alloc := newTestAllocator(blocks)
 	alloc.makeLinks(blocks)
 	alloc.mergeChains()
 	alloc.colorChains(testClass)
@@ -150,7 +156,7 @@ func TestMergeBranches(t *testing.T) {
 			if len(alloc.allChains) != 2 {
 				t.Errorf("got %d chains, expected 2", len(alloc.allChains))
 			}
-			if len(alloc.findMoves()) != 0 {
+			if len(alloc.findMoves(blocks)) != 0 {
 				t.Errorf("unexpected moves")
 			}
 		})
@@ -203,8 +209,10 @@ func TestMergeJump(t *testing.T) {
 	if b.Register() == q.Register() {
 		t.Errorf("b and q are in the same register")
 	}
-	if len(alloc.findMoves()) != 0 {
-		t.Errorf("unexpected moves")
+	moves := alloc.findMoves([]*regBlockT{entry, target})
+	expected := []RegMoveT{{b.ReferenceRegister(entry.end.Inputs[2]), q.Register()}}
+	if len(moves) != 1 || !slices.Equal(moves[entry.end].Jump, expected) {
+		t.Errorf("wrong moves")
 	}
 }
 
@@ -257,11 +265,44 @@ func isTestReducible(next [][]int) bool {
 	return true
 }
 
+// A block with a single next block jumps to it.  Add blocks as needed
+// so that the next blocks of conditionals have no other predecessors.
+// The result is in reverse postorder.
+func addTestJumps(next [][]int) [][]int {
+	previous := make([]int, len(next))
+	for _, nexts := range next {
+		for _, j := range nexts {
+			previous[j] += 1
+		}
+	}
+	for i, nexts := range slices.Clone(next) {
+		if 1 < len(nexts) {
+			next[i] = slices.Clone(nexts)
+			for k, j := range nexts {
+				if previous[j] != 1 {
+					next[i][k] = len(next)
+					next = append(next, []int{j})
+				}
+			}
+		}
+	}
+	blocks := makeTestBlocks(next)
+	ordered := orderBlocks(blocks[0])
+	result := [][]int{}
+	for _, block := range ordered {
+		nexts := []int{}
+		for _, other := range block.next {
+			nexts = append(nexts, slices.Index(ordered, other))
+		}
+		result = append(result, nexts)
+	}
+	return result
+}
+
 // Without 'loops' blocks can only go to later blocks.
 func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*regBlockT {
 	count := 1 + random.Intn(size)
 	next := make([][]int, count)
-	jumpTarget := make([]bool, count) // all predecessors have just one next
 	for i := range count {
 		if i < count-1 {
 			next[i] = []int{i + 1} // makes everything reachable
@@ -270,18 +311,18 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 				next[i] = append(next[i], other)
 			}
 		}
-		jumpTarget[i] = 0 < i && random.Intn(2) == 0
 	}
 	if loops {
 		for range 1 + random.Intn(3) {
 			addTestLoop(random, next)
 		}
 	}
+	next = addTestJumps(next)
+	count = len(next)
+	jumpTarget := make([]bool, count)
 	for _, nexts := range next {
-		if len(nexts) != 1 {
-			for _, j := range nexts {
-				jumpTarget[j] = false
-			}
+		if len(nexts) == 1 {
+			jumpTarget[nexts[0]] = true
 		}
 	}
 
@@ -313,7 +354,9 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 			}
 		}
 		if jumpTarget[i] {
-			parameters[i] = newVars(1 + random.Intn(2))
+			parameters[i] = newVars(random.Intn(3))
+		} else if i == 0 {
+			parameters[i] = newVars(2)
 		}
 		block.addTestCall(nil, EarlyRegUse, parameters[i], LateRegUse)
 		vars.Add(parameters[i]...)
@@ -337,7 +380,7 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 			block.addTestCall(pick(random.Intn(3)), -random.Intn(2), outputs, -random.Intn(2))
 			vars.Add(outputs...)
 		}
-		if len(next[i]) == 1 && jumpTarget[next[i][0]] {
+		if len(next[i]) == 1 {
 			// Filled in below, when the target's parameters are known.
 			available[i] = vars
 			continue
@@ -346,21 +389,17 @@ func randomTestBlocks(random *rand.Rand, size int, maxLive int, loops bool) []*r
 		available[i] = vars
 	}
 	for i, block := range blocks {
-		if len(next[i]) == 1 && jumpTarget[next[i][0]] {
+		if len(next[i]) == 1 {
 			j := next[i][0]
 			members := available[i].Members()
 			slices.SortFunc(members, func(x, y *VariableT) int { return x.Id - y.Id })
 			arguments := []*VariableT{}
 			for range parameters[j] {
-				if 0 < len(members) {
-					arguments = append(arguments, members[random.Intn(len(members))])
-				}
+				arguments = append(arguments, members[random.Intn(len(members))])
 			}
 			block.addTestCall(arguments, EarlyRegUse, nil, LateRegUse)
-			if len(arguments) == len(parameters[j]) {
-				block.makeTestJump(blocks[j])
-				continue
-			}
+			block.makeTestJump(blocks[j])
+			continue
 		}
 		for _, j := range next[i] {
 			block.addNext(blocks[j])
@@ -411,7 +450,13 @@ func TestMergeDeterministic(t *testing.T) {
 
 // Run a program, checking that every register that is read contains the
 // right value.  Values are just distinct integers.
-func simulate(t *testing.T, random *rand.Rand, start *regBlockT, maxBlocks int) {
+func simulate(
+	t *testing.T,
+	random *rand.Rand,
+	start *regBlockT,
+	moves map[*CallNodeT]*RegMovesT,
+	maxBlocks int,
+) {
 	t.Helper()
 	registers := map[RegisterT]int{}
 	values := map[*VariableT]int{}
@@ -428,11 +473,26 @@ func simulate(t *testing.T, random *rand.Rand, start *regBlockT, maxBlocks int) 
 		registers[vart.Register()] = value
 		values[vart] = value
 	}
+	doMoves := func(moves []RegMoveT) {
+		moved := map[RegisterT]int{}
+		for _, move := range moves {
+			_, found := moved[move.To]
+			if found {
+				t.Fatalf("two moves to the same register")
+			}
+			moved[move.To] = registers[move.From]
+		}
+		maps.Copy(registers, moved)
+	}
 	arguments := []int{} // from the previous block's jump
 	block := start
 	for range maxBlocks {
 		for i, call := range block.calls() {
 			isJump := call.Primop.Name() == "jump"
+			callMoves := moves[call]
+			if callMoves != nil {
+				doMoves(callMoves.Before)
+			}
 			jumpArguments := arguments
 			arguments = []int{}
 			for _, phase := range []int{EarlyRegUse, LateRegUse} {
@@ -448,13 +508,21 @@ func simulate(t *testing.T, random *rand.Rand, start *regBlockT, maxBlocks int) 
 					if spec.PhaseOffset != phase {
 						continue
 					} else if len(jumpArguments) != 0 {
-						write(call.Outputs[j], jumpArguments[j])
+						// Already in its register.
+						values[call.Outputs[j]] = jumpArguments[j]
+						if registers[call.Outputs[j].Register()] != jumpArguments[j] {
+							t.Fatalf("wrong value for jump argument")
+						}
 					} else {
 						write(call.Outputs[j], nextValue)
 						nextValue += 1
 					}
 				}
 			}
+		}
+		lastMoves := moves[block.end]
+		if lastMoves != nil {
+			doMoves(lastMoves.Jump)
 		}
 		if len(block.next) == 0 {
 			return
@@ -538,13 +606,22 @@ func TestMergeRandom(t *testing.T) {
 		}
 		checkLinks(t, alloc)
 		checkAllocation(t, alloc)
-		if len(alloc.findMoves()) != 0 {
-			results[kind+" moves"] += 1
-			continue
+		moves := alloc.findMoves(blocks)
+		hasMoves := false
+		for call, callMoves := range moves {
+			// Jumps usually have some.
+			if len(callMoves.Before) != 0 ||
+				len(call.Inputs)-1 < len(callMoves.Jump) {
+				hasMoves = true
+			}
 		}
-		results[kind+" no moves"] += 1
+		if hasMoves {
+			results[kind+" moves"] += 1
+		} else {
+			results[kind+" no moves"] += 1
+		}
 		for range 10 {
-			simulate(t, random, blocks[0], 60)
+			simulate(t, random, blocks[0], moves, 60)
 		}
 	}
 	t.Logf("%v", results)
