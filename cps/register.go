@@ -6,7 +6,6 @@ package cps
 import (
 	"fmt"
 	"math/bits"
-	"slices"
 )
 
 const (
@@ -24,9 +23,10 @@ type RegUseSpecT struct {
 	Fixed RegisterT
 }
 
-// Used by the generic primops in primop.go for values passed by jumps and
-// procedure calls.  These primops are for evaluating code, and back ends
-// supply their own register usage.
+// For values passed by jumps, which only need to be in some register, as
+// they just pass values along.  The generic primops in primop.go also use
+// it for JumpLambda outputs and procedure arguments, which back ends
+// replace with their own register usage.
 var jumpRegisterClass = &RegisterClassT{Name: "jump", registers: nil}
 var jumpRegUseSpec = &RegUseSpecT{Class: jumpRegisterClass, PhaseOffset: EarlyRegUse}
 
@@ -50,10 +50,6 @@ func (class *RegisterClassT) SetRegisters(allRegisters []RegisterT, usableMask u
 	}
 	class.registers = usable
 	class.registerIndex = registerIndex
-}
-
-func (class *RegisterClassT) numRegisters() int {
-	return len(class.registers)
 }
 
 // Use masks for register sets, as is traditional.
@@ -112,10 +108,6 @@ type liveRangeT struct {
 type intervalT struct {
 	start int // index of call, inclusive
 	end   int // ditto, exclusive
-}
-
-func (live *liveRangeT) clone() *liveRangeT {
-	return &liveRangeT{slices.Clone(live.intervals)}
 }
 
 // Intervals must be nonempty and added from highest to lowest.

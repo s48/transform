@@ -59,7 +59,8 @@
 // is only added to a tree once, so the number of paths does not
 // matter.  Searches are ordered by the depth of their shallowest leaf,
 // in units of program points, with shallower ones having priority over
-// deeper ones.  Constants come after everything else, as they never need
+// deeper ones.  Empty paths, between chains that are directly connected,
+// come first.  Constants come after everything else, as they never need
 // to be spilled.  Links in inner loops come before those in outer ones, as
 // good allocation is more important there.  Within a loop, paths that go
 // through a jump from an argument to an output come after those that
@@ -97,8 +98,9 @@
 // spilled links.  Other links above it are left for other paths.  Any
 // link that never ends up in a chain is in memory.  When merging is done
 // every link is in a chain, which is in a register, or is a source link,
-// or is in memory.  The allocator keeps the set of links that are not in
-// chains, so that the move finder does not have to look for them.
+// or is a constant's, or is in memory.  The allocator keeps the set of
+// links that are not in chains, and marks the variables of those that are
+// in memory, so that the move finder does not have to look for them.
 // There is no backtracking.  The search priorities are intended to make the
 // link that does not get a register the right one to spill.
 //
@@ -113,6 +115,11 @@
 //
 // Each procedure is allocated separately.  For now procedures cannot have
 // free variables, as there are no lexical environments.
+//
+// Each register class is merged and colored separately, as chains in
+// different classes never conflict and links never connect them.  The
+// allocator keeps the chains and root links (source links and the extra
+// constant links described below) of each class apart.
 //
 // Calls can change the values in some registers, such as those that a
 // procedure call does not preserve.  Each chain has a set of registers
@@ -486,8 +493,8 @@ type allocatorT struct {
 	inMemory []*VariableT
 	// Links that are not in chains.  Links are added when they are made and
 	// removed when they are put in a chain, so when merging is done these
-	// are the source links and the links that are in memory.  Anchor links
-	// are made in chains and are never here.
+	// are the source links, constants' links, and the links that are in
+	// memory.  Anchor links are made in chains and are never here.
 	unchainedLinks util.SetT[*linkT]
 	// The chains that are live at each program point.
 	chainPoints []util.SetT[*chainT]

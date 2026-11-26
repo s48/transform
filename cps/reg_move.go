@@ -6,7 +6,8 @@
 //
 // A link's location is its source, its chain's register, its constant, or
 // its variable's slot.  A move or load is needed where a link in a chain
-// follows one with a different location, at the joint between them.
+// follows one with a different location, at the joint between them, and
+// where a value is used in a fixed register.
 // Joints between blocks are done for each edge, as a joint at the start
 // of a JumpLambda may be for several jumps.  A value that is ever in
 // memory is stored when it is created.

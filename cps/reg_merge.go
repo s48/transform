@@ -14,11 +14,12 @@ import (
 	"github.com/s48/transform/util"
 )
 
-// A shortest-first search down from a chain, along links that are not yet
-// in chains, for a path to any other chain.  The path may also lead back
-// to the same chain, such as along the second side of a conditional after
-// the first was added.  Each chain with such links below it has a search.
-// Every link has some chain above it, so this reaches all of them.
+// A shortest-first search down from a chain or a root link, along links
+// that are not yet in chains, for a path to a chain or to a use in a fixed
+// register.  The path may also lead back to the same chain, such as along
+// the second side of a conditional after the first was added.  Each chain
+// and root link with such links below it has a search.  Every link has
+// some chain or root link above it, so this reaches all of them.
 //
 // The path is empty if the other chain is directly below this one, which
 // happens when two anchors have no program points between them.  Empty
@@ -197,8 +198,8 @@ func (search *searchT) checkClass(class *RegisterClassT) {
 	}
 }
 
-// Find the initial conflicts and start a search from every chain in the
-// class.  Classes are merged independently, as chains in different
+// Find the initial conflicts and start a search from every chain and root
+// link in the class.  Classes are merged independently, as chains in different
 // classes never conflict and links never connect them.
 func (alloc *allocatorT) startMerge(class *RegisterClassT) {
 	// The queue returns the greatest element first.
@@ -260,15 +261,6 @@ func (alloc *allocatorT) extendSearch(search *searchT) {
 	} else if len(search.leaves) != 0 {
 		alloc.searchQueue.Enqueue(search)
 	}
-}
-
-// The chains of all classes.
-func (alloc *allocatorT) sortedChains() []*chainT {
-	chains := util.NewSet[*chainT]()
-	for _, inputs := range alloc.classes {
-		chains.AddSet(inputs.chains)
-	}
-	return sortChains(chains)
 }
 
 func sortChains(chains util.SetT[*chainT]) []*chainT {

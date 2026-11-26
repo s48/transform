@@ -288,3 +288,7 @@ func TestLiveRangeRandom(t *testing.T) {
 		}
 	}
 }
+
+func (live *liveRangeT) clone() *liveRangeT {
+	return &liveRangeT{slices.Clone(live.intervals)}
+}

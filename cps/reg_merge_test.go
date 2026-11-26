@@ -775,3 +775,12 @@ func TestCanMerge(t *testing.T) {
 		})
 	}
 }
+
+// The chains of all classes.
+func (alloc *allocatorT) sortedChains() []*chainT {
+	chains := util.NewSet[*chainT]()
+	for _, inputs := range alloc.classes {
+		chains.AddSet(inputs.chains)
+	}
+	return sortChains(chains)
+}
