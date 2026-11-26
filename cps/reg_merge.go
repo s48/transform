@@ -385,6 +385,12 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 		// Loading it again is as good as a move from a separate chain.
 		choices = choices[:len(choices)-1]
 	}
+	if links[0].followsAnchor {
+		// It must be in the anchor's chain, if it is in a register at all.
+		choices = slices.DeleteFunc(choices, func(chains []*chainT) bool {
+			return upper == nil || !slices.Contains(chains, upper)
+		})
+	}
 	for _, chains := range choices {
 		if alloc.canMerge(chains, live, class) {
 			chain := alloc.mergePath(chains, links, live, class)

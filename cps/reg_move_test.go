@@ -21,7 +21,14 @@ func TestMovesRandom(t *testing.T) {
 		alloc.makeLinks(blocks)
 		for _, link := range alloc.allLinks() {
 			// And some are left in memory.
-			if link.chain == nil && random.Intn(4) < seed%5 {
+			if link.chain == nil && link.source == nil && random.Intn(4) < seed%5 {
+				if link.followsAnchor {
+					// It can only be in the anchor's chain.
+					chain := link.starts[0].chain
+					chain.addLink(link)
+					chain.allowed &= alloc.allowedRegisters(&link.liveRange, testClass)
+					continue
+				}
 				chain := newChain(link, testClass)
 				chain.allowed = alloc.allowedRegisters(&link.liveRange, testClass)
 				alloc.allChains.Add(chain)
@@ -55,8 +62,8 @@ func TestMovesRandom(t *testing.T) {
 	}
 }
 
-// A value that is in one register before a call, another during it, and a
-// third after it, and the same for the edges to and from a conditional.
+// A value that is moved between calls, and on the edges to and from a
+// conditional.
 func TestMovePlacement(t *testing.T) {
 	setTestRegisters(10)
 	x := &VariableT{Name: "x", Id: 1}
@@ -82,7 +89,9 @@ func TestMovePlacement(t *testing.T) {
 	}
 	definition := setRegister(x.definition, 1)
 	use := setRegister(x.uses[blocks[0].calls()[1].Inputs[0]], 2)
-	end := setRegister(blocks[0].endLinks[x], 3)
+	// The use's anchor ends at the call's early point, so the link after it
+	// has to be in the same register.
+	end := setRegister(blocks[0].endLinks[x], 2)
 	top := setRegister(blocks[1].liveLinks[x].link, 4)
 	// Contains no program points, as the use is in the first call.
 	setRegister(blocks[2].liveLinks[x].link, 5)
@@ -95,7 +104,6 @@ func TestMovePlacement(t *testing.T) {
 		move RegMoveT
 	}{
 		{blocks[0].calls()[1], RegMoveT{definition, use}},
-		{blocks[0].end, RegMoveT{use, end}},
 		{blocks[1].start, RegMoveT{end, top}},
 		{blocks[1].end, RegMoveT{top, use1}},
 		{blocks[2].start, RegMoveT{end, use2}},
@@ -399,5 +407,58 @@ func TestPreferenceLoopDepth(t *testing.T) {
 			t.Errorf("%s: t is in %s and r in %s", order, tv.Register(), r.Register())
 		}
 		useAllocatedFixed(false)
+	}
+}
+
+// A call with two inputs that are both used afterwards, and an output.
+// With two registers one of the inputs has to be in memory during the
+// call.  It used to need three registers.
+func TestInputsLiveAfter(t *testing.T) {
+	setTestRegisters(2)
+	vars := testVars("x y z")
+	x, y, z := vars[0], vars[1], vars[2]
+	block := makeRegBlock()
+	block.addTestCall(nil, EarlyRegUse, []*VariableT{x, y}, LateRegUse)
+	block.addTestCall([]*VariableT{x, y}, EarlyRegUse, []*VariableT{z}, LateRegUse)
+	block.addTestCall([]*VariableT{z, x}, EarlyRegUse, nil, LateRegUse)
+	block.addTestCall([]*VariableT{y}, EarlyRegUse, nil, LateRegUse)
+	alloc := allocateTestBlocks([]*regBlockT{block})
+	checkAllocation(t, alloc)
+	allocation := alloc.findMoves([]*regBlockT{block})
+	if allocation.NumSlots == 0 {
+		t.Errorf("something should be in memory")
+	}
+	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+}
+
+// v's only use is in a fixed register, in a loop, so its links go around
+// the loop without reaching an anchor.  It used to be left in memory.
+func TestFixedUseInLoop(t *testing.T) {
+	setTestRegisters(4)
+	v := &VariableT{Name: "v", Id: 1}
+	entry := makeRegBlock()
+	entry.addTestCall(nil, EarlyRegUse, []*VariableT{v}, LateRegUse)
+	entry.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	loop := makeRegBlock()
+	loop.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	loop.addTestCall([]*VariableT{v}, EarlyRegUse, nil, LateRegUse)
+	setTestFixed(loop.inputSpecs[1])
+	back := makeRegBlock()
+	back.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	exit := makeRegBlock()
+	exit.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
+	entry.makeTestJump(loop)
+	back.makeTestJump(loop)
+	loop.addNext(back)
+	loop.addNext(exit)
+	blocks := orderBlocks(entry)
+	alloc := allocateTestBlocks(blocks)
+	checkAllocation(t, alloc)
+	allocation := alloc.findMoves(blocks)
+	if allocation.NumSlots != 0 {
+		t.Errorf("v should not be in memory")
+	}
+	for range 5 {
+		simulate(t, rand.New(rand.NewSource(1)), entry, allocation.Moves, 10)
 	}
 }

@@ -1,8 +1,9 @@
 // Copyright 2024 Richard Kelsey. All rights reserved.
 // See file LICENSE for notices and license.
 
-// Compile and evaluate test files.
-//  --go <file>     Compiles and evaluates the functions in 'test/<file>.go'.
+// Convert, simplify, and evaluate the functions in 'test/test'.  This
+// tests the front end and the simplifier.  It uses the generic primops,
+// which can be evaluated but not allocated registers.
 //  --func <name>   Only uses the named function.
 
 package main
@@ -10,9 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
-
-	"go/ast"
-	"go/types"
+	"slices"
 
 	"github.com/s48/transform/cps"
 	"github.com/s48/transform/front"
@@ -28,45 +27,33 @@ func main() {
 	frontEnd := front.MakeFrontEnd(nil, nil)
 	frontEnd.LoadPackage("/home/kelsey/me/git/transform/test/test")
 	frontEnd.ParseAndTypeCheck()
+	frontEnd.ProcessDecls()
 
-	var testDecls []*ast.FuncDecl
-	for _, astFile := range frontEnd.Packages[0].AstFiles {
-		for _, rawDecl := range astFile.Decls {
-			switch decl := rawDecl.(type) {
-			case *ast.FuncDecl:
-				if decl.Name.Name == *goFunction || *goFunction == "" {
-					testDecls = append(testDecls, decl)
-				}
-			}
+	// In source order, for determinism.
+	testVars := []*cps.VariableT{}
+	for vart, decl := range frontEnd.Funcs {
+		if decl.Name.Name == *goFunction || *goFunction == "" {
+			testVars = append(testVars, vart)
 		}
 	}
-	if len(testDecls) == 0 {
+	if len(testVars) == 0 {
 		panic(fmt.Sprintf("test function '%s' not found", *goFunction))
 	}
+	slices.SortFunc(testVars, func(x, y *cps.VariableT) int {
+		return int(frontEnd.Funcs[x].Pos()) - int(frontEnd.Funcs[y].Pos())
+	})
 
-	for _, decl := range testDecls {
-		bindings := makeBindings()
-		testVar := front.BindIdent(bindings.bindings, decl.Name, frontEnd.TypesInfo)
-		testVar.Flags["package"] = true
-		env := front.MakeEnv(frontEnd.TypesInfo, bindings)
+	for _, testVar := range testVars {
 		cps.Lambdas = util.NewSet[*cps.CallNodeT]()
-		lambda := front.ConvertFuncDecl(decl, env)
+		funcVars, funcVals := frontEnd.ConvertFuncs(testVar, false)
+		if len(funcVars) != 1 {
+			panic(fmt.Sprintf("test function '%s' calls other functions, which is not supported",
+				testVar.Name))
+		}
+		lambda := funcVals[0]
 		front.SimplifyTopLevel(lambda)
-		cps.AllocateRegisters(lambda)
-		runTests(lambda.Name, lambda)
+		runTests(testVar.Name, lambda)
 	}
-}
-
-type bindingsT struct {
-	bindings front.BindingsT
-}
-
-func makeBindings() *bindingsT {
-	return &bindingsT{front.BindingsT{}}
-}
-
-func (bindings *bindingsT) LookupVar(obj types.Object) *cps.VariableT {
-	return bindings.bindings[obj]
 }
 
 //----------------------------------------------------------------
@@ -182,7 +169,7 @@ func runTests(filename string, proc *cps.CallNodeT) bool {
 	okay := true
 	fmt.Printf("running '%s' tests\n", filename)
 	for i, testCase := range test.cases {
-		results := cps.RegEvaluate(proc, testCase.inputs)
+		results := cps.Evaluate(proc, testCase.inputs)
 		if len(results) != len(testCase.outputs) {
 			fmt.Printf("  test %d returned %d outputs when %d were expected\n",
 				i, len(results), len(testCase.outputs))

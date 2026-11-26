@@ -6,17 +6,17 @@ package cps
 import (
 	"fmt"
 	"math/bits"
-	"math/rand"
 	"slices"
 )
 
 const (
-	EarlyRegUse  = -1
-	LateRegUse   = 0
+	EarlyRegUse = -1
+	LateRegUse  = 0
 )
 
+// How a primop uses a register for one of a call's inputs or outputs.
 type RegUseSpecT struct {
-	PhaseOffset int // -1, 0 for early and late use
+	PhaseOffset int // EarlyRegUse or LateRegUse
 	Class       *RegisterClassT
 	// If non-nil the value has to be in this register, which is not one
 	// that the allocator assigns.  The value is moved there, or from there,
@@ -24,11 +24,9 @@ type RegUseSpecT struct {
 	Fixed RegisterT
 }
 
-// Variable ranges are found bottom up.  If the block ends with a
-// jump we need to create ranges for its inputs but we do not have
-// any immediate way of determining their register specs.  This
-// class is used as a stand-in and is later ignored in favor of
-// the actual class given by a primitive.
+// Used by the generic primops in primop.go for values passed by jumps and
+// procedure calls.  These primops are for evaluating code, and back ends
+// supply their own register usage.
 var jumpRegisterClass = &RegisterClassT{Name: "jump", registers: nil}
 var jumpRegUseSpec = &RegUseSpecT{Class: jumpRegisterClass, PhaseOffset: EarlyRegUse}
 
@@ -72,12 +70,9 @@ type ClobbersRegistersT interface {
 	ClobberedRegisters(call *CallNodeT) []RegisterT
 }
 
-func (class *RegisterClassT) newRegisterSet(minimumReg ...int) registerSetT {
-	mask := (uint64(1) << len(class.registers)) - 1
-	if len(minimumReg) != 0 {
-		mask &= ^((uint64(1) << minimumReg[0]) - 1)
-	}
-	return registerSetT(mask)
+// All of the class's registers.
+func (class *RegisterClassT) newRegisterSet() registerSetT {
+	return registerSetT((uint64(1) << len(class.registers)) - 1)
 }
 
 func (class *RegisterClassT) removeRegister(
@@ -101,28 +96,6 @@ func (class *RegisterClassT) firstRegister(set registerSetT) RegisterT {
 	return reg
 }
 
-func (class *RegisterClassT) randomRegister(
-	set registerSetT,
-	random *rand.Rand,
-) RegisterT {
-	mask := uint64(set)
-	count := bits.OnesCount64(mask)
-	if count == 0 {
-		panic(fmt.Sprintf("empty register set for class %s", class.Name))
-	}
-	index := random.Intn(count)
-	for i := 0; ; i++ {
-		if (mask & (1 << i)) != 0 {
-			if 0 < index {
-				index -= 1
-			} else {
-				return class.registers[i]
-			}
-		}
-	}
-	panic("bit not found in register set")
-}
-
 //----------------------------------------------------------------
 
 type RegisterT interface {
@@ -137,8 +110,8 @@ type liveRangeT struct {
 }
 
 type intervalT struct {
-	start  int // index of call, inclusive
-	end    int // ditto, exclusive
+	start int // index of call, inclusive
+	end   int // ditto, exclusive
 }
 
 func (live *liveRangeT) clone() *liveRangeT {
@@ -231,4 +204,3 @@ func (live *liveRangeT) union(other *liveRangeT) *liveRangeT {
 	}
 	return result
 }
-

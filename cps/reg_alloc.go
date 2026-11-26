@@ -192,28 +192,32 @@ func (vart *VariableT) addUse(node NodeT, link *linkT) {
 }
 
 type linkT struct {
-	id         int       // for debugging
-	variable   *VariableT
-	starts     []*linkT
-	ends       []*linkT
-	liveRange  liveRangeT
-	chain      *chainT   // if it is in one
-	spilled    bool      // it cannot be in a chain
+	id        int // for debugging
+	variable  *VariableT
+	starts    []*linkT
+	ends      []*linkT
+	liveRange liveRangeT
+	chain     *chainT // if it is in one
+	spilled   bool    // it cannot be in a chain
 	// Non-nil for a source link, which is where a value is created other
 	// than in a register that the allocator assigns.  Source links are never
 	// in chains.  This is the value's location, either a constant or a fixed
 	// register.
 	source *RegLocationT
-	// If non-nil the link ends where its value is moved to a fixed register,
-	// which can be the end of a path just as a chain can.
-	fixedUse   *RegisterClassT
-	searches   []*searchT // searches that may be using this link
-	loopDepth  int       // depth of the innermost loop containing the link
+	// The link starts within a call, after a use whose anchor ends at the
+	// call's early point.  As moves are only possible between calls, this
+	// can only be in the anchor's chain or in memory.
+	followsAnchor bool
+	// If non-nil the value is moved from this link to a fixed register.  The
+	// link can be the end of a path just as a chain can.
+	fixedUse  *RegisterClassT
+	searches  []*searchT // searches that may be using this link
+	loopDepth int        // depth of the innermost loop containing the link
 }
 
 var nextLinkIdx = -1
 
-func nextLinkId () int {
+func nextLinkId() int {
 	nextLinkIdx += 1
 	return nextLinkIdx
 }
@@ -221,6 +225,29 @@ func nextLinkId () int {
 func joinLinks(from *linkT, to *linkT) {
 	Push(&to.starts, from)
 	Push(&from.ends, to)
+}
+
+// For debugging.  If true the links for each variable are printed.
+var PrintRegisterLinks = false
+
+func (alloc *allocatorT) printLinks(blocks []*regBlockT) {
+	for _, block := range blocks {
+		fmt.Printf("block %s_%d [%d, %d)\n", block.start.Name, block.start.Id, block.startIndex, block.endIndex)
+	}
+	// Sort the variables to get deterministic behavior.
+	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
+		if vart.definition != nil {
+			printVarLinks(vart, vart.definition)
+		}
+	}
+	for _, block := range blocks {
+		for _, vart := range block.start.Outputs {
+			liveLink := block.liveLinks[vart]
+			if liveLink != nil {
+				printVarLinks(vart, liveLink.link)
+			}
+		}
+	}
 }
 
 func printVarLinks(vart *VariableT, link *linkT) {
@@ -254,26 +281,26 @@ func printVarLinks(vart *VariableT, link *linkT) {
 type chainT struct {
 	id        int
 	links     []*linkT
-	liveRange *liveRangeT      // All of the links' intervals combined.
+	liveRange *liveRangeT // All of the links' intervals combined.
 	class     *RegisterClassT
 	conflicts util.SetT[*chainT]
 	allowed   registerSetT // registers that the chain can be assigned
-	search    *searchT         // for links below this, if there are any
-	Register  RegisterT        // what gets assigned to this
+	search    *searchT     // for links below this, if there are any
+	Register  RegisterT    // what gets assigned to this
 	peer      *chainT
 }
 
 var nextChainIdx = -1
 
-func nextChainId () int {
+func nextChainId() int {
 	nextChainIdx += 1
 	return nextChainIdx
 }
 
 func newChain(link *linkT, class *RegisterClassT) *chainT {
 	chain := &chainT{
-		id: nextChainId(),
-		class: class,
+		id:        nextChainId(),
+		class:     class,
 		liveRange: &liveRangeT{},
 		conflicts: util.NewSet[*chainT](),
 		allowed:   class.newRegisterSet(),
@@ -304,7 +331,7 @@ func (chain *chainT) merge(other *chainT) {
 	other = other.root()
 	other.peer = chain
 	chain.liveRange = chain.liveRange.union(other.liveRange)
-	chain.links = append(chain.links, other.links ...)
+	chain.links = append(chain.links, other.links...)
 	for otherConflict := range other.conflicts {
 		otherConflict.conflicts.Remove(other)
 		otherConflict.conflicts.Add(chain)
@@ -322,14 +349,14 @@ type regBlockT struct {
 	callCount  int // number of calls in the block
 	next       []*regBlockT
 
-	seen       bool
-	loop       *regLoopT            // innermost loop containing this block, if any
-	liveIn     util.SetT[*VariableT] // variables live at the start of the block
-	liveOutputs util.SetT[*VariableT] // JumpLambda outputs whose values are used
-	jumpArgs  []*VariableT          // jump arguments, nil if not in a register
-	liveLinks map[*VariableT]*liveLinkT // when done these are for the start of the block
-	endLinks  map[*VariableT]*linkT     // links live at the end of the block
-	inputSpecs  [][]*RegUseSpecT // cached for each call in the block
+	seen        bool
+	loop        *regLoopT                 // innermost loop containing this block, if any
+	liveIn      util.SetT[*VariableT]     // variables live at the start of the block
+	liveOutputs util.SetT[*VariableT]     // JumpLambda outputs whose values are used
+	jumpArgs    []*VariableT              // jump arguments, nil if not in a register
+	liveLinks   map[*VariableT]*liveLinkT // when done these are for the start of the block
+	endLinks    map[*VariableT]*linkT     // links live at the end of the block
+	inputSpecs  [][]*RegUseSpecT          // cached for each call in the block
 	outputSpecs [][]*RegUseSpecT
 }
 
@@ -351,14 +378,10 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	block.end = end
 	for call := start; ; call = call.Next[0] {
 		inputs, outputs := call.Primop.RegisterUsage(call)
-		for _, spec := range inputs {
-			if spec != nil && spec.Class.Name == "r" {
-				panic(fmt.Sprintf("bad spec from call %s", call))
-			}
-		}
-		for _, spec := range outputs {
-			if spec != nil && spec.Class.Name == "r" {
-				panic(fmt.Sprintf("bad spec from call %s", call))
+		// The generic primops in primop.go are only for evaluating code.
+		for _, spec := range slices.Concat(inputs, outputs) {
+			if spec != nil && spec.Class == generalRegister {
+				panic(fmt.Sprintf("call %s uses a generic primop's register specs", call))
 			}
 		}
 
@@ -424,7 +447,6 @@ func AllocateRegisters(
 	classes ...*RegisterClassT,
 ) *RegAllocationT {
 	makeVarsForLiterals()
-	PpCps(top)
 	result := &RegAllocationT{
 		Moves:  map[*CallNodeT]*RegMovesT{},
 		Frames: map[*CallNodeT]*RegFrameT{},
@@ -485,19 +507,8 @@ func (alloc *allocatorT) allocate(
 			proc.Name, proc.Id))
 	}
 
-	// Sort the variables to get deterministic behavior.
-	for _, vart := range sortedVars(maps.Keys(alloc.allVars)) {
-		if vart.definition != nil {
-			printVarLinks(vart, vart.definition)
-		}
-	}
-	for _, block := range blocks {
-		for _, vart := range block.start.Outputs {
-			liveLink := block.liveLinks[vart]
-			if liveLink != nil {
-				printVarLinks(vart, liveLink.link)
-			}
-		}
+	if PrintRegisterLinks {
+		alloc.printLinks(blocks)
 	}
 
 	alloc.mergeChains()
@@ -548,7 +559,6 @@ func (alloc *allocatorT) makeLinks(blocks []*regBlockT) {
 
 func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	block := top.Block.(*regBlockT)
-	fmt.Printf("block %s_%d [%d, %d)\n", block.start.Name, block.start.Id, block.startIndex, block.endIndex)
 	// Links do not cross block boundaries.  Each variable that is live
 	// at the end of the block gets a new link, which is connected to the
 	// following blocks in connectNext.
@@ -565,7 +575,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 
 	callIndex := block.callCount - 1
 	lateIndex := block.endIndex - 1
-	for call := block.end; 0 <= callIndex ; call = call.parent {
+	for call := block.end; 0 <= callIndex; call = call.parent {
 		for i, spec := range block.outputSpecs[callIndex] {
 			// The values of a JumpLambda's outputs come from the jumps to it,
 			// so they are just live at the start of the block.
@@ -609,10 +619,14 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				vart := call.Inputs[i].(*ReferenceNodeT).Variable
 				if block.liveLinks[vart] == nil {
 					link := block.makeLink(vart)
-					link.fixedUse = spec.Class
 					block.liveLinks[vart] = &liveLinkT{endIndex: lateIndex, link: link}
 				}
-				alloc.addPreference(block, block.liveLinks[vart].link, spec.Fixed)
+				// This is set even if the value is used later.  The use may be
+				// the only reason for the value to be in a register, as when the
+				// value is passed around a loop.
+				link := block.liveLinks[vart].link
+				link.fixedUse = spec.Class
+				alloc.addPreference(block, link, spec.Fixed)
 			}
 		}
 		for _, input := range inputs {
@@ -620,10 +634,8 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			start := lateIndex + EarlyRegUse
 			end := lateIndex + input.phaseOffset + 1 // +1 for inclusive to exclusive
 			liveLink := block.liveLinks[vart]
-			if liveLink != nil {
-				// Cover the entire call if the value is needed after it.
-				// This ensures that moves are only needed between calls.
-				end = lateIndex + 1
+			if liveLink != nil && end != lateIndex+1 {
+				liveLink.link.followsAnchor = true
 			}
 			link := alloc.addAnchorLink(vart, start, end, input.class, liveLink)
 			for _, index := range input.argIndexes {
@@ -738,7 +750,7 @@ type callInputT struct {
 	variable    *VariableT
 	class       *RegisterClassT
 	phaseOffset int   // maximum phase offset of all uses
-	argIndexes  []int  // indexes into the call's inputs
+	argIndexes  []int // indexes into the call's inputs
 }
 
 func getInputs(call *CallNodeT, specs []*RegUseSpecT) []*callInputT {
@@ -774,8 +786,8 @@ func (alloc *allocatorT) addAnchorLink(
 	liveLink *liveLinkT,
 ) *linkT {
 	link := &linkT{
-		id: nextLinkId(),
-		variable: vart,
+		id:        nextLinkId(),
+		variable:  vart,
 		liveRange: liveRangeT{[]intervalT{{start, end}}},
 	}
 	// It's nil if vart is never referenced.
