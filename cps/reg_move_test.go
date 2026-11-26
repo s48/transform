@@ -4,6 +4,7 @@
 package cps
 
 import (
+	"maps"
 	"math/rand"
 	"slices"
 	"testing"
@@ -60,6 +61,7 @@ func TestMovesRandom(t *testing.T) {
 			chain.Register = testClass.firstRegister(available)
 		}
 		checkAllocation(t, alloc)
+		alloc.markInMemory()
 		moves, _ := alloc.findMoves(blocks)
 		for _, callMoves := range moves {
 			count += len(callMoves.Before) + len(callMoves.At)
@@ -110,6 +112,7 @@ func TestMovePlacement(t *testing.T) {
 	use1 := setRegister(x.uses[blocks[1].end.Inputs[0]], 6)
 	use2 := setRegister(x.uses[blocks[2].end.Inputs[0]], 7)
 
+	alloc.markInMemory()
 	moves, _ := alloc.findMoves(blocks)
 	tests := []struct {
 		call *CallNodeT
@@ -473,4 +476,15 @@ func TestFixedUseInLoop(t *testing.T) {
 	for range 5 {
 		simulate(t, rand.New(rand.NewSource(1)), entry, regMoves, 10)
 	}
+}
+
+// All links, sorted to get deterministic behavior: those in chains, in
+// order, followed by the others.
+func (alloc *allocatorT) allLinks() []*linkT {
+	links := []*linkT{}
+	for _, chain := range alloc.sortedChains() {
+		links = append(links, chain.links...)
+	}
+	return append(links, slices.SortedFunc(maps.Keys(alloc.unchainedLinks),
+		func(x, y *linkT) int { return x.id - y.id })...)
 }

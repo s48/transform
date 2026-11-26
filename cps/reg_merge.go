@@ -81,7 +81,7 @@ func pathPriority(link *linkT, parent *searchLinkT, jump bool) int {
 		loopDepth = min(loopDepth, maxLoopDepth-(parent.priority>>loopDepthShift)&maxLoopDepth)
 		priority |= parent.priority & (constantBit | jumpBit)
 	}
-	if link.variable.constant() != nil {
+	if link.variable.constant != nil {
 		priority |= constantBit
 	}
 	if jump {
@@ -439,7 +439,7 @@ func (alloc *allocatorT) addLinks(
 	} else if upper == nil || upper == lower {
 		choices = [][]*chainT{{lower}, {}}
 	}
-	if links[0].variable.constant() != nil {
+	if links[0].variable.constant != nil {
 		// Loading it again is as good as a move from a separate chain.
 		choices = choices[:len(choices)-1]
 	}

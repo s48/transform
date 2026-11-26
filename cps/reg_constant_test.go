@@ -31,7 +31,7 @@ func TestConstantInRegister(t *testing.T) {
 	regMoves, frame := alloc.findMoves([]*regBlockT{block})
 	// It is loaded right after where it is bound, and stays in a register.
 	use := c.ReferenceRegister(block.end.Inputs[0])
-	expected := []RegMoveT{{RegLocationT{Constant: c.constant()}, RegLocationT{Register: use}}}
+	expected := []RegMoveT{{RegLocationT{Constant: c.constant}, RegLocationT{Register: use}}}
 	moves := regMoves[block.calls[1]]
 	if len(regMoves) != 1 || moves == nil || !slices.Equal(moves.Before, expected) ||
 		frame.NumSlots != 0 {
@@ -51,7 +51,7 @@ func TestConstantLoaded(t *testing.T) {
 		t.Errorf("constant should not be loaded where it is bound")
 	}
 	use := c.ReferenceRegister(block.end.Inputs[0])
-	expected := []RegMoveT{{RegLocationT{Constant: c.constant()}, RegLocationT{Register: use}}}
+	expected := []RegMoveT{{RegLocationT{Constant: c.constant}, RegLocationT{Register: use}}}
 	moves := regMoves[block.end]
 	if frame.NumSlots != 0 || len(regMoves) != 1 || moves == nil ||
 		!slices.Equal(moves.Before, expected) {
@@ -85,7 +85,7 @@ func TestConstantArguments(t *testing.T) {
 	pRegister := RegLocationT{Register: p.ReferenceRegister(blocks[3].end.Inputs[0])}
 	for i, constant := range []*VariableT{c, d} {
 		jump := blocks[i+1].end
-		expected := []RegMoveT{{RegLocationT{Constant: constant.constant()}, pRegister}}
+		expected := []RegMoveT{{RegLocationT{Constant: constant.constant}, pRegister}}
 		moves := regMoves[jump]
 		// Either before the jump or as part of it.
 		if moves == nil || !slices.Equal(slices.Concat(moves.Before, moves.At), expected) {

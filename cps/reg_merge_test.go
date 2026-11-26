@@ -53,6 +53,7 @@ func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
 	alloc.makeLinks(blocks)
 	alloc.mergeChains(testClass)
 	alloc.colorChains(testClass)
+	alloc.markInMemory()
 	return alloc
 }
 
@@ -535,7 +536,7 @@ func simulate(
 		return value
 	}
 	write := func(vart *VariableT, value int) {
-		constant := vart.constant()
+		constant := vart.constant
 		if constant != nil {
 			// The value is always the same and can be loaded at any point.
 			location := RegLocationT{Constant: constant}

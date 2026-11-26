@@ -159,6 +159,17 @@ import (
 type varRegAllocT struct {
 	definition *linkT
 	uses       map[NodeT]*linkT
+	// The literal, if the value is bound to one by a loadReg call.  These
+	// are never stored in memory, as they can be loaded whenever they are
+	// needed.  Set when finding live ranges.
+	constant NodeT
+	// Some link of the value is in memory.  Set when merging is done.
+	inMemory bool
+	// The value's slot, if it has one.  Values in memory have slots, as may
+	// arguments passed to JumpLambda outputs that are in memory, which then
+	// share the output's slot.
+	hasSlot bool
+	slot    int
 }
 
 func (vart *VariableT) Register() RegisterT {
@@ -178,15 +189,6 @@ func (vart *VariableT) ReferenceRegister(node NodeT) RegisterT {
 		panic(fmt.Sprintf("No register for %s", node))
 	}
 	return link.chain.root().Register
-}
-
-// Returns the literal if the variable is bound to a constant.  These are
-// never stored in memory, as they can be loaded whenever they are needed.
-func (vart *VariableT) constant() NodeT {
-	if vart.Binder != nil && vart.Binder.Primop.Name() == "loadReg" {
-		return vart.Binder.Inputs[0]
-	}
-	return nil
 }
 
 func (vart *VariableT) addUse(node NodeT, link *linkT) {
@@ -480,6 +482,8 @@ type allocatorT struct {
 	clobbers map[int][]RegisterT
 	// Links whose values are moved to or from fixed registers.
 	preferences []preferenceT
+	// The variables with links in memory, sorted by id.
+	inMemory []*VariableT
 	// Links that are not in chains.  Links are added when they are made and
 	// removed when they are put in a chain, so when merging is done these
 	// are the source links and the links that are in memory.  Anchor links
@@ -562,7 +566,21 @@ func (alloc *allocatorT) allocate(
 		alloc.mergeChains(class)
 		alloc.colorChains(class)
 	}
+	alloc.markInMemory()
 	return alloc.findMoves(blocks)
+}
+
+// The links that merging left out of chains are in memory, other than
+// source links and constants, which are loaded when they are needed.
+func (alloc *allocatorT) markInMemory() {
+	for link := range alloc.unchainedLinks {
+		vart := link.variable
+		if link.source == nil && vart.constant == nil && !vart.inMemory {
+			vart.inMemory = true
+			Push(&alloc.inMemory, vart)
+		}
+	}
+	slices.SortFunc(alloc.inMemory, func(x, y *VariableT) int { return x.Id - y.Id })
 }
 
 // Returns the blocks reachable from 'start' in reverse postorder.
@@ -632,12 +650,15 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			}
 			vart := call.Outputs[i]
 			alloc.allVars.Add(vart)
+			vart.constant = nil
+			if call.Primop.Name() == "loadReg" {
+				vart.constant = call.Inputs[0]
+			}
 			start := lateIndex + spec.PhaseOffset
 			end := lateIndex + 1 // inclusive -> exclusive
 
 			liveLink := block.liveLinks[vart]
-			source := RegLocationT{Register: spec.Fixed, Constant: vart.constant()}
-			if source == (RegLocationT{}) {
+			if spec.Fixed == nil && vart.constant == nil {
 				vart.definition = alloc.addAnchorLink(block, vart, start, end, spec.Class, liveLink)
 			} else if liveLink != nil {
 				// A source link, not an anchor, as this does not have to be in
@@ -645,7 +666,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				// a value in a fixed register is moved out of it.
 				link := alloc.makeLink(vart, block.loop.depth())
 				link.liveRange.add(intervalT{start, end})
-				link.source = &source
+				link.source = &RegLocationT{Register: spec.Fixed, Constant: vart.constant}
 				if spec.Fixed != nil {
 					alloc.addPreference(block, liveLink.link, spec.Fixed)
 				}
@@ -770,7 +791,7 @@ func (alloc *allocatorT) connectJump(block *regBlockT) {
 			// The output's value may come only from constants, which are not in
 			// chains.  Searches from constants have the lowest priority, so
 			// this has a search of its own.
-			if argument.constant() != nil && alloc.rootLinkClass(end) == nil {
+			if argument.constant != nil && alloc.rootLinkClass(end) == nil {
 				alloc.addRootLink(end, alloc.rootLinkClass(argument.definition))
 			}
 		}
