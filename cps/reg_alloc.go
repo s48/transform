@@ -34,8 +34,8 @@
 //    one at C will have one start and no ends.
 // Every link has at least one program point.  If there are none between
 // two anchors, as when B directly follows A and uses X early, the anchors
-// are connected directly.  Their chains are merged, if possible, before
-// the searches begin.
+// are connected directly.  The search from A's chain finds B's chain at
+// the end of an empty path.
 // Links end at the end of a basic block and are connected to the
 // links for the same variable at the start of the following blocks.
 // Thus there are no parallel links: at each program point a variable
@@ -895,7 +895,7 @@ func (alloc *allocatorT) addPreference(block *regBlockT, link *linkT, register R
 
 // Connect a link that ends at 'end' to the one below it.  If the one below
 // would have no program points, 'link' takes its place.  Two anchors may
-// then be connected, and their chains are merged by startMerge.
+// then be connected, with an empty path between their chains.
 func (alloc *allocatorT) connectBelow(block *regBlockT, link *linkT, end int, liveLink *liveLinkT) {
 	below := liveLink.link
 	if liveLink.endIndex != end {

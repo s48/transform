@@ -19,6 +19,10 @@ import (
 // the first was added.  Each chain with such links below it has a search.
 // Every link has some chain above it, so this reaches all of them.
 //
+// The path is empty if the other chain is directly below this one, which
+// happens when two anchors have no program points between them.  Empty
+// paths come first, as there is nothing to add to the merged chain.
+//
 // Constants come after everything else, as they never need to be spilled.
 // Links inside loops come before those outside, so that inner loops are
 // done before outer ones.  Within a loop, paths that go through a jump from
@@ -39,6 +43,7 @@ type searchT struct {
 
 type searchLinkT struct {
 	constant  bool // the path here has a constant's link
+	direct    bool // the path is empty and the link is in a chain
 	link      *linkT
 	parent    *searchLinkT // nil if the link is next to the chain
 	depth     int          // program points in this and all its ancestors
@@ -48,6 +53,9 @@ type searchLinkT struct {
 
 // True if x is shorter than y, meaning that x should be extended first.
 func (x *searchLinkT) isShorter(y *searchLinkT) bool {
+	if x.direct != y.direct {
+		return x.direct
+	}
 	if x.constant != y.constant {
 		return y.constant
 	}
@@ -89,26 +97,33 @@ func (search *searchT) addLeaves(from *linkT, parent *searchLinkT) {
 }
 
 func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
-	if link.chain != nil || link.spilled || link.source != nil || search.seen.Contains(link) {
+	if link.spilled || link.source != nil || search.seen.Contains(link) {
 		return
 	}
+	var leaf *searchLinkT
+	if link.chain == nil {
+		leaf = &searchLinkT{
+			link:      link,
+			parent:    parent,
+			constant:  link.variable.constant() != nil,
+			depth:     link.liveRange.size(),
+			jump:      jump,
+			loopDepth: link.loopDepth,
+		}
+		if parent != nil {
+			leaf.constant = leaf.constant || parent.constant
+			leaf.depth += parent.depth
+			leaf.jump = leaf.jump || parent.jump
+			leaf.loopDepth = min(leaf.loopDepth, parent.loopDepth)
+		}
+		Push(&link.searches, search)
+	} else if parent == nil && search.chain != nil && link.chain.root() != search.chain {
+		leaf = &searchLinkT{link: link, direct: true}
+	} else {
+		return // below a leaf, so extend() finds it
+	}
 	search.seen.Add(link)
-	leaf := &searchLinkT{
-		link:      link,
-		parent:    parent,
-		constant:  link.variable.constant() != nil,
-		depth:     link.liveRange.size(),
-		jump:      jump,
-		loopDepth: link.loopDepth,
-	}
-	if parent != nil {
-		leaf.constant = leaf.constant || parent.constant
-		leaf.depth += parent.depth
-		leaf.jump = leaf.jump || parent.jump
-		leaf.loopDepth = min(leaf.loopDepth, parent.loopDepth)
-	}
 	Push(&search.leaves, leaf)
-	Push(&link.searches, search)
 	if leaf.isShorter(search.leaves[search.shortest]) {
 		search.shortest = len(search.leaves) - 1
 	}
@@ -131,10 +146,18 @@ func (search *searchT) removeShortest() *searchLinkT {
 }
 
 // Extends the search along the shortest leaf.  If that reaches a chain
-// this returns the path and the chain.  If it reaches a use in a fixed
-// register then it returns the path and nil.  Otherwise it returns nil.
+// this returns the path, which may be empty, and the chain.  If it reaches
+// a use in a fixed register then it returns the path and nil.  Otherwise
+// it returns nil.
 func (search *searchT) extend() ([]*linkT, *chainT) {
 	leaf := search.removeShortest()
+	if leaf.direct {
+		lower := leaf.link.chain.root()
+		if lower.class != search.chain.class {
+			panic("link between chains with different register classes")
+		}
+		return []*linkT{}, lower
+	}
 	for _, end := range leaf.link.ends {
 		lower := end.chain.root()
 		if lower == nil {
@@ -186,11 +209,6 @@ func (alloc *allocatorT) startMerge() {
 		alloc.addConflicts(chain, chain.liveRange)
 	}
 	for _, chain := range chains {
-		for _, link := range chain.links {
-			alloc.mergeDirect(link, nil)
-		}
-	}
-	for _, chain := range alloc.sortedChains() {
 		alloc.startSearch(chain)
 	}
 	for _, link := range alloc.rootLinks {
@@ -198,39 +216,38 @@ func (alloc *allocatorT) startMerge() {
 	}
 }
 
-// Merges the chain of a link with those of the links below it that are
-// in chains, if possible, other than 'skip'.  There is no path between
-// them for a search to find.  This happens when a value is used early in
-// the call after the one that defines it, or in the first call of a block.
-func (alloc *allocatorT) mergeDirect(link *linkT, skip *chainT) {
-	for _, end := range link.ends {
-		upper := link.chain.root()
-		lower := end.chain.root()
-		if lower != nil && lower != upper && lower != skip && lower.class == upper.class &&
-			alloc.canMerge([]*chainT{upper, lower}, &liveRangeT{}, lower.class) {
-			alloc.mergePath([]*chainT{upper, lower}, nil, &liveRangeT{}, lower.class)
-		}
-	}
-}
-
 func (alloc *allocatorT) mergeChains() {
 	alloc.startMerge()
 	for !alloc.searchQueue.Empty() {
 		search := alloc.searchQueue.Dequeue()
-		if search.cancelled {
-			continue
+		if !search.cancelled {
+			alloc.extendSearch(search)
 		}
-		path, lower := search.extend()
-		if path != nil {
-			search.cancelled = true // a new one is started if needed
-			alloc.addPath(search.chain, lower, path)
-			if search.chain == nil {
-				// Does nothing if the link is now in a chain.
-				alloc.startRootSearch(search.root)
-			}
+	}
+}
+
+// Extends a search that has been taken from the queue, adding any path it
+// finds.  The search goes back in the queue if it has more to do.
+func (alloc *allocatorT) extendSearch(search *searchT) {
+	path, lower := search.extend()
+	if path != nil && len(path) == 0 {
+		// The chains are directly connected.
+		chains := []*chainT{search.chain, lower}
+		empty := &liveRangeT{}
+		if alloc.canMerge(chains, empty, lower.class) {
+			alloc.startSearch(alloc.mergePath(chains, nil, empty, lower.class))
 		} else if len(search.leaves) != 0 {
 			alloc.searchQueue.Enqueue(search)
 		}
+	} else if path != nil {
+		search.cancelled = true // a new one is started if needed
+		alloc.addPath(search.chain, lower, path)
+		if search.chain == nil {
+			// Does nothing if the link is now in a chain.
+			alloc.startRootSearch(search.root)
+		}
+	} else if len(search.leaves) != 0 {
+		alloc.searchQueue.Enqueue(search)
 	}
 }
 
@@ -414,9 +431,6 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 	for _, chains := range choices {
 		if alloc.canMerge(chains, live, class) {
 			chain := alloc.mergePath(chains, links, live, class)
-			for _, link := range links {
-				alloc.mergeDirect(link, lower.root())
-			}
 			// The links below these may have changed.  The lower chain is
 			// unchanged if it was not merged.
 			alloc.startSearch(chain)

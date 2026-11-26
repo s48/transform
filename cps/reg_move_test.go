@@ -37,6 +37,15 @@ func TestMovesRandom(t *testing.T) {
 			}
 		}
 		alloc.startMerge()
+		// Do only the empty paths, which merge directly connected chains.
+		// Those come first, so the searches still in the queue after them
+		// have none.
+		for !alloc.searchQueue.Empty() {
+			search := alloc.searchQueue.Dequeue()
+			if !search.cancelled && search.leaves[search.shortest].direct {
+				alloc.extendSearch(search)
+			}
+		}
 		chains := alloc.sortedChains()
 		random.Shuffle(len(chains), func(i, j int) {
 			chains[i], chains[j] = chains[j], chains[i]
