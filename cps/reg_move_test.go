@@ -42,7 +42,7 @@ func TestMovesRandom(t *testing.T) {
 		// have none.
 		for !alloc.searchQueue.Empty() {
 			search := alloc.searchQueue.Dequeue()
-			if !search.cancelled && search.leaves[search.shortest].direct {
+			if !search.cancelled && search.leaves[0].direct {
 				alloc.extendSearch(search)
 			}
 		}

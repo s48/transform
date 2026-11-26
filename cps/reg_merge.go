@@ -7,6 +7,7 @@
 package cps
 
 import (
+	"container/heap"
 	"maps"
 	"slices"
 
@@ -32,41 +33,61 @@ import (
 // variable.
 
 type searchT struct {
-	id        int             // used for making sorts deterministic
-	class     *RegisterClassT // of the chains and fixed registers it may reach
-	chain     *chainT         // nil if this starts from a link
-	root      *linkT          // the link, if there is no chain
-	leaves    []*searchLinkT
-	shortest  int               // index of the leaf to extend next
+	id        int               // used for making sorts deterministic
+	class     *RegisterClassT   // of the chains and fixed registers it may reach
+	chain     *chainT           // nil if this starts from a link
+	root      *linkT            // the link, if there is no chain
+	leaves    leafHeapT         // leaves[0] is the next to extend
 	seen      util.SetT[*linkT] // every link that is or has been a leaf
 	cancelled bool              // may still be in the queue
 }
 
 type searchLinkT struct {
-	constant  bool // the path here has a constant's link
-	direct    bool // the path is empty and the link is in a chain
-	link      *linkT
-	parent    *searchLinkT // nil if the link is next to the chain
-	depth     int          // program points in this and all its ancestors
-	jump      bool         // the path here goes from an argument to an output
-	loopDepth int          // minimum loop depth of this and all its ancestors
+	direct   bool // the path is empty and the link is in a chain
+	link     *linkT
+	parent   *searchLinkT // nil if the link is next to the chain
+	priority int          // lower values are extended first
 }
 
-// True if x is shorter than y, meaning that x should be extended first.
-func (x *searchLinkT) isShorter(y *searchLinkT) bool {
-	if x.direct != y.direct {
-		return x.direct
+// The ordering criteria for the path from the search's start to a leaf,
+// combined into a single integer with the most important in the high
+// bits.  From highest to lowest:
+//   - empty paths come first
+//   - paths with a constant's link come last
+//   - paths whose shallowest link is in a deeper loop come first
+//   - paths that go from an argument to an output come later
+//   - shorter paths, in program points, come first
+//
+// Values too large for their fields are clamped, which can only make
+// leaves that differ beyond that point equal.
+const (
+	maxLoopDepth   = 1<<8 - 1
+	maxSearchDepth = 1<<16 - 1
+	jumpBit        = 1 << 16
+	loopDepthShift = 17
+	constantBit    = 1 << 25
+	notDirectBit   = 1 << 26
+)
+
+// The priority of the path that goes through 'parent', if it is non-nil,
+// to 'link'.  'jump' is true if the step to 'link' goes from an argument
+// to an output.  Empty paths have priority zero.
+func pathPriority(link *linkT, parent *searchLinkT, jump bool) int {
+	depth := link.liveRange.size()
+	loopDepth := min(link.loopDepth, maxLoopDepth)
+	priority := notDirectBit
+	if parent != nil {
+		depth += parent.priority & maxSearchDepth
+		loopDepth = min(loopDepth, maxLoopDepth-(parent.priority>>loopDepthShift)&maxLoopDepth)
+		priority |= parent.priority & (constantBit | jumpBit)
 	}
-	if x.constant != y.constant {
-		return y.constant
+	if link.variable.constant() != nil {
+		priority |= constantBit
 	}
-	if x.loopDepth != y.loopDepth {
-		return y.loopDepth < x.loopDepth // inner loops go first
+	if jump {
+		priority |= jumpBit
 	}
-	if x.jump != y.jump {
-		return y.jump
-	}
-	return x.depth < y.depth
+	return priority | (maxLoopDepth-loopDepth)<<loopDepthShift | min(depth, maxSearchDepth)
 }
 
 var nextSearchIdx = -1
@@ -79,7 +100,6 @@ func nextSearchId() int {
 // Start over, with only the links directly below the chain.
 func (search *searchT) restart() {
 	search.leaves = nil
-	search.shortest = 0
 	search.seen = util.NewSet[*linkT]()
 	if search.chain == nil {
 		search.addLeaves(search.root, nil)
@@ -104,18 +124,9 @@ func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
 	var leaf *searchLinkT
 	if link.chain == nil {
 		leaf = &searchLinkT{
-			link:      link,
-			parent:    parent,
-			constant:  link.variable.constant() != nil,
-			depth:     link.liveRange.size(),
-			jump:      jump,
-			loopDepth: link.loopDepth,
-		}
-		if parent != nil {
-			leaf.constant = leaf.constant || parent.constant
-			leaf.depth += parent.depth
-			leaf.jump = leaf.jump || parent.jump
-			leaf.loopDepth = min(leaf.loopDepth, parent.loopDepth)
+			link:     link,
+			parent:   parent,
+			priority: pathPriority(link, parent, jump),
 		}
 		Push(&link.searches, search)
 	} else if parent == nil && search.chain != nil && link.chain.root() != search.chain {
@@ -124,25 +135,20 @@ func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
 		return // below a leaf, so extend() finds it
 	}
 	search.seen.Add(link)
-	Push(&search.leaves, leaf)
-	if leaf.isShorter(search.leaves[search.shortest]) {
-		search.shortest = len(search.leaves) - 1
-	}
+	heap.Push(&search.leaves, leaf)
 }
 
-// Remove and return the shortest leaf.
-func (search *searchT) removeShortest() *searchLinkT {
-	leaves := search.leaves
-	leaf := leaves[search.shortest]
-	last := len(leaves) - 1
-	leaves[search.shortest] = leaves[last]
-	search.leaves = leaves[:last]
-	search.shortest = 0
-	for i, other := range search.leaves {
-		if other.isShorter(search.leaves[search.shortest]) {
-			search.shortest = i
-		}
-	}
+// The leaves of a search, as a heap with the shortest first.
+type leafHeapT []*searchLinkT
+
+func (leaves leafHeapT) Len() int           { return len(leaves) }
+func (leaves leafHeapT) Less(i, j int) bool { return leaves[i].priority < leaves[j].priority }
+func (leaves leafHeapT) Swap(i, j int)      { leaves[i], leaves[j] = leaves[j], leaves[i] }
+func (leaves *leafHeapT) Push(leaf any)     { *leaves = append(*leaves, leaf.(*searchLinkT)) }
+func (leaves *leafHeapT) Pop() any {
+	old := *leaves
+	leaf := old[len(old)-1]
+	*leaves = old[:len(old)-1]
 	return leaf
 }
 
@@ -151,7 +157,7 @@ func (search *searchT) removeShortest() *searchLinkT {
 // a use in a fixed register then it returns the path and nil.  Otherwise
 // it returns nil.
 func (search *searchT) extend() ([]*linkT, *chainT) {
-	leaf := search.removeShortest()
+	leaf := heap.Pop(&search.leaves).(*searchLinkT)
 	if leaf.direct {
 		lower := leaf.link.chain.root()
 		search.checkClass(lower.class)
@@ -197,12 +203,10 @@ func (search *searchT) checkClass(class *RegisterClassT) {
 func (alloc *allocatorT) startMerge(class *RegisterClassT) {
 	// The queue returns the greatest element first.
 	alloc.searchQueue = util.MakePriorityQueue(func(x *searchT, y *searchT) bool {
-		xLeaf := x.leaves[x.shortest]
-		yLeaf := y.leaves[y.shortest]
-		if xLeaf.isShorter(yLeaf) {
-			return false
-		} else if yLeaf.isShorter(xLeaf) {
-			return true
+		xPriority := x.leaves[0].priority
+		yPriority := y.leaves[0].priority
+		if xPriority != yPriority {
+			return yPriority < xPriority
 		}
 		return y.id < x.id
 	})
@@ -327,12 +331,10 @@ func (alloc *allocatorT) removeFromSearches(links []*linkT) {
 
 func (alloc *allocatorT) restartSearch(search *searchT) {
 	oldLeaves := search.leaves
-	oldShortest := search.shortest
 	search.restart()
 	if len(search.leaves) == 0 {
 		// The queue may still need to be able to compare it with others.
 		search.leaves = oldLeaves
-		search.shortest = oldShortest
 		search.cancelled = true
 	} else {
 		alloc.searchQueue.Update(search)
@@ -593,15 +595,17 @@ func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 		}
 	}
 	for i := 0; i < len(todo); i++ {
-		// Sort the chains to get deterministic behavior.
-		for _, neighbor := range sortChains(todo[i].conflicts) {
+		ready := util.NewSet[*chainT]()
+		for neighbor := range todo[i].conflicts {
 			// This also decrements the degrees of removed chains, which
 			// does no harm as they are already below the limit.
 			degrees[neighbor] -= 1
 			if degrees[neighbor] == neighbor.allowed.size()-1 {
-				Push(&todo, neighbor)
+				ready.Add(neighbor)
 			}
 		}
+		// Sort the chains to get deterministic behavior.
+		todo = append(todo, sortChains(ready)...)
 	}
 	if len(todo) != len(degrees) {
 		panic("chains cannot be colored")

@@ -103,9 +103,11 @@ func (alloc *allocatorT) findMoves(blocks []*regBlockT) (RegMoveMapT, *RegFrameT
 	}
 
 	registers := []RegisterT{}
-	for _, chain := range alloc.sortedChains() {
-		if !slices.Contains(registers, chain.Register) {
-			Push(&registers, chain.Register)
+	for _, inputs := range alloc.classes {
+		for chain := range inputs.chains {
+			if !slices.Contains(registers, chain.Register) {
+				Push(&registers, chain.Register)
+			}
 		}
 	}
 	slices.SortFunc(registers, func(x, y RegisterT) int { return x.Number() - y.Number() })
