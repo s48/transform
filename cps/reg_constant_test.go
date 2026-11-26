@@ -29,12 +29,15 @@ func TestConstantInRegister(t *testing.T) {
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
 	allocation := alloc.findMoves([]*regBlockT{block})
-	if c.Register() == nil || c.Register() != c.ReferenceRegister(block.end.Inputs[0]) {
-		t.Errorf("constant should be in one register")
+	// It is loaded right after where it is bound, and stays in a register.
+	use := c.ReferenceRegister(block.end.Inputs[0])
+	expected := []RegMoveT{{RegLocationT{Constant: c.constant()}, RegLocationT{Register: use}}}
+	moves := allocation.Moves[block.calls()[1]]
+	if len(allocation.Moves) != 1 || moves == nil || !slices.Equal(moves.Before, expected) ||
+		allocation.NumSlots != 0 {
+		t.Errorf("wrong moves")
 	}
-	if len(allocation.Moves) != 0 || allocation.NumSlots != 0 {
-		t.Errorf("there should be no moves")
-	}
+	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
 }
 
 // Without a register for it the constant is loaded just where it is used.
@@ -78,12 +81,19 @@ func TestConstantArguments(t *testing.T) {
 	alloc := allocateTestBlocks(blocks)
 	checkAllocation(t, alloc)
 	allocation := alloc.findMoves(blocks)
-	if len(allocation.Moves) != 0 || allocation.NumSlots != 0 {
-		t.Errorf("the constants should be loaded directly into p's register")
+	// The constants are loaded directly into p's register at the jumps.
+	pRegister := RegLocationT{Register: p.ReferenceRegister(blocks[3].end.Inputs[0])}
+	for i, constant := range []*VariableT{c, d} {
+		jump := blocks[i+1].end
+		expected := []RegMoveT{{RegLocationT{Constant: constant.constant()}, pRegister}}
+		moves := allocation.Moves[jump]
+		// Either before the jump or as part of it.
+		if moves == nil || !slices.Equal(slices.Concat(moves.Before, moves.At), expected) {
+			t.Errorf("wrong moves for %s", constant.Name)
+		}
 	}
-	if c.Register() == nil || c.Register() != p.ReferenceRegister(blocks[3].end.Inputs[0]) ||
-		c.Register() != d.Register() {
-		t.Errorf("c, d and p should be in the same register")
+	if len(allocation.Moves) != 2 || allocation.NumSlots != 0 {
+		t.Errorf("wrong moves")
 	}
 	random := rand.New(rand.NewSource(1))
 	for range 10 {

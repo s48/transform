@@ -68,18 +68,15 @@ type moveFinderT struct {
 	// Program points where each variable is live.
 	varPoints map[*VariableT]util.SetT[int]
 	slots     map[*VariableT]int // for variables that are in memory
-	// Values that are in fixed registers at the point where they are created.
-	fixedOutputs map[int]map[*VariableT]RegisterT
-	moves        map[*CallNodeT]*RegMovesT
+	moves     map[*CallNodeT]*RegMovesT
 }
 
 func (alloc *allocatorT) findMoves(blocks []*regBlockT) *procAllocationT {
 	finder := &moveFinderT{
-		blocks:       blocks,
-		pointLinks:   make([]map[*VariableT]*linkT, alloc.numProgramPoints),
-		varPoints:    map[*VariableT]util.SetT[int]{},
-		fixedOutputs: map[int]map[*VariableT]RegisterT{},
-		moves:        map[*CallNodeT]*RegMovesT{},
+		blocks:     blocks,
+		pointLinks: make([]map[*VariableT]*linkT, alloc.numProgramPoints),
+		varPoints:  map[*VariableT]util.SetT[int]{},
+		moves:      map[*CallNodeT]*RegMovesT{},
 	}
 	for i := range finder.pointLinks {
 		finder.pointLinks[i] = map[*VariableT]*linkT{}
@@ -98,19 +95,6 @@ func (alloc *allocatorT) findMoves(blocks []*regBlockT) *procAllocationT {
 		}
 	}
 	numSlots := finder.assignSlots(finder.findSlotGroups())
-	for _, block := range blocks {
-		for i, call := range block.calls() {
-			for j, spec := range block.outputSpecs[i] {
-				if spec != nil && spec.Fixed != nil && call.CallType != JumpLambda {
-					point := block.startIndex + 2*i + 1 // where moves out of it start
-					if finder.fixedOutputs[point] == nil {
-						finder.fixedOutputs[point] = map[*VariableT]RegisterT{}
-					}
-					finder.fixedOutputs[point][call.Outputs[j]] = spec.Fixed
-				}
-			}
-		}
-	}
 	for _, block := range blocks {
 		finder.findBlockMoves(block)
 	}
@@ -186,7 +170,8 @@ func (finder *moveFinderT) findSlotGroups() []*slotGroupT {
 			continue
 		}
 		for point := range finder.varPoints[vart] {
-			if finder.pointLinks[point][vart].chain == nil {
+			link := finder.pointLinks[point][vart]
+			if link.chain == nil && link.source == nil {
 				addVar(vart)
 				break
 			}
@@ -299,13 +284,6 @@ func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
 					live.Add(vart)
 				}
 			}
-			// Values created in fixed registers have no links where they are
-			// created.
-			for vart := range finder.fixedOutputs[point-1] {
-				if finder.pointLinks[point][vart] != nil {
-					live.Add(vart)
-				}
-			}
 			finder.addBefore(call, finder.movesBetween(live, point-1, point))
 		}
 		stores := finder.findStores(call, block.outputSpecs[i])
@@ -368,9 +346,7 @@ func (finder *moveFinderT) findStores(call *CallNodeT, specs []*RegUseSpecT) []R
 		if spec == nil || vart.definition == nil || vart.constant() != nil {
 			continue
 		}
-		// A value in a fixed register is only there during the call.  It is
-		// moved out by movesBetween().
-		from := RegLocationT{Register: spec.Fixed}
+		from := RegLocationT{Register: spec.Fixed} // from its source link
 		if spec.Fixed == nil {
 			from.Register = vart.definition.chain.root().Register
 		}
@@ -408,11 +384,10 @@ func (finder *moveFinderT) findJumpMoves(block *regBlockT, next *regBlockT) []Re
 }
 
 func (finder *moveFinderT) location(vart *VariableT, point int) RegLocationT {
-	fixed := finder.fixedOutputs[point][vart]
-	if fixed != nil {
-		return RegLocationT{Register: fixed}
-	}
 	link := finder.pointLinks[point][vart]
+	if link.source != nil {
+		return *link.source
+	}
 	if link.chain != nil {
 		return RegLocationT{Register: link.chain.root().Register}
 	}

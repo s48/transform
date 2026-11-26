@@ -73,7 +73,7 @@ func (search *searchT) restart() {
 	search.shortest = 0
 	search.seen = util.NewSet[*linkT]()
 	if search.chain == nil {
-		search.addLeaf(search.root, nil, false)
+		search.addLeaves(search.root, nil)
 	} else {
 		for _, link := range search.chain.links {
 			search.addLeaves(link, nil)
@@ -89,7 +89,7 @@ func (search *searchT) addLeaves(from *linkT, parent *searchLinkT) {
 }
 
 func (search *searchT) addLeaf(link *linkT, parent *searchLinkT, jump bool) {
-	if link.chain != nil || link.spilled || search.seen.Contains(link) {
+	if link.chain != nil || link.spilled || link.source != nil || search.seen.Contains(link) {
 		return
 	}
 	search.seen.Add(link)
@@ -301,7 +301,7 @@ func (alloc *allocatorT) startSearch(chain *chainT) {
 	}
 }
 
-// Start a search down from, and including, a link.
+// Start a search down from a link.
 func (alloc *allocatorT) startRootSearch(link *linkT) {
 	search := &searchT{id: nextSearchId(), root: link}
 	search.restart()

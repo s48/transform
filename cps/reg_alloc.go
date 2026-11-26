@@ -7,8 +7,8 @@
 // of chains are just the inputs and outputs of each call
 // (ignoring those that do not need to be in registers, and
 // the arguments of jumps and outputs of JumpLambdas, which
-// just pass values along, values in fixed registers, and the
-// binding of constants).
+// just pass values along, and values that do not start out in
+// registers, which are described below).
 // They can necessarily be assigned registers, as any single
 // call is limited to the architecture's registers.
 // A chain consists of a set of connected links.
@@ -95,13 +95,14 @@
 // backtracking.  The search priorities are intended to make the
 // link that does not get a register the right one to spill.
 //
-// Some values have to be in particular registers, which are not ones that
-// the allocator assigns, such as those used for passing arguments and
-// returning values.  These values have no anchors.  They are moved to or
-// from their fixed registers as part of the call that uses or creates
-// them.  A link that leads to a use in a fixed register can be the end of
-// a path, as a chain can, and there are searches from links where values
-// are created in fixed registers.
+// Some values do not start out in registers assigned by the allocator.
+// These are constants and values created in fixed registers, such as
+// arguments and returned values.  Where such a value is created there is
+// a source link, which is never in a chain.  Its location is the constant
+// or the fixed register.  As there may be no chain above them, there are
+// searches from source links, as there are from chains.  Values used in
+// fixed registers are moved there as part of the call that uses them.  A
+// link that leads to such a use can be the end of a path, as a chain can.
 //
 // Each procedure is allocated separately.  For now procedures cannot have
 // free variables, as there are no lexical environments.
@@ -114,10 +115,10 @@
 //
 // Constants are not stored in memory.  They are instead loaded wherever
 // they are needed and are not already in a register, with nothing done
-// where they are bound.  As there may be no chain there, there is a
-// search that starts from the link where each constant is bound.  There
-// is also one from each output of a JumpLambda that has a constant as an
-// argument, as that may be the only source of the output's value.
+// where they are bound.  As searches from constants have the lowest
+// priority, there is also a search from the last link of each constant
+// that is passed to a jump.  That may be the only source of the value of
+// the JumpLambda's output.
 //
 // The chains are then assigned registers using the usual graph coloring
 // algorithm, which the criteria ensure will succeed.  This leaves:
@@ -198,6 +199,11 @@ type linkT struct {
 	liveRange  liveRangeT
 	chain      *chainT   // if it is in one
 	spilled    bool      // it cannot be in a chain
+	// Non-nil for a source link, which is where a value is created other
+	// than in a register that the allocator assigns.  Source links are never
+	// in chains.  This is the value's location, either a constant or a fixed
+	// register.
+	source *RegLocationT
 	// If non-nil the link ends where its value is moved to a fixed register,
 	// which can be the end of a path just as a chain can.
 	fixedUse   *RegisterClassT
@@ -402,7 +408,9 @@ type allocatorT struct {
 	clobbers map[int][]RegisterT
 	// Links whose values are moved to or from fixed registers.
 	preferences []preferenceT
-	// Links with values that don't come from a chain.
+	// Links that have searches of their own, as their values may not come
+	// from a chain.  These are source links and the last links of constants
+	// that are passed to jumps.
 	rootLinks []*linkT
 	// The chains that are live at each program point.
 	chainPoints []util.SetT[*chainT]
@@ -570,18 +578,17 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			end := lateIndex + 1 // inclusive -> exclusive
 
 			liveLink := block.liveLinks[vart]
-			if vart.constant() == nil && spec.Fixed == nil {
+			source := RegLocationT{Register: spec.Fixed, Constant: vart.constant()}
+			if source == (RegLocationT{}) {
 				vart.definition = alloc.addAnchorLink(vart, start, end, spec.Class, liveLink)
 			} else if liveLink != nil {
-				// Not an anchor, as this does not have to be in a register.
-				// The value of a constant can be loaded when needed and a
-				// value in a fixed register is moved out of it.
+				// A source link, not an anchor, as this does not have to be in
+				// a register.  A constant can be loaded when it is needed and
+				// a value in a fixed register is moved out of it.
 				link := block.makeLink(vart)
-				// A value in a fixed register is not in a register assigned by
-				// the allocator during the call that creates it.
-				if spec.Fixed == nil {
-					link.liveRange.add(intervalT{start, end})
-				} else {
+				link.liveRange.add(intervalT{start, end})
+				link.source = &source
+				if spec.Fixed != nil {
 					alloc.addPreference(block, liveLink.link, spec.Fixed)
 				}
 				connectBelow(link, end, liveLink)
@@ -675,10 +682,13 @@ func (alloc *allocatorT) connectJump(block *regBlockT) {
 		// The output may not be used.
 		output := block.next[0].outputLink(i)
 		if argument != nil && output != nil {
-			joinLinks(block.endLinks[argument], output)
-			// Constants may not be in chains.
-			if argument.constant() != nil && !slices.Contains(alloc.rootLinks, output) {
-				Push(&alloc.rootLinks, output)
+			end := block.endLinks[argument]
+			joinLinks(end, output)
+			// The output's value may come only from constants, which are not in
+			// chains.  Searches from constants have the lowest priority, so
+			// this has a search of its own.
+			if argument.constant() != nil && !slices.Contains(alloc.rootLinks, end) {
+				Push(&alloc.rootLinks, end)
 			}
 		}
 	}
