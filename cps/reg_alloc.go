@@ -32,6 +32,10 @@
 //  - Thus the A anchor link will have no starts and one end,
 //    the one at B will have one start and one end, and the
 //    one at C will have one start and no ends.
+// Every link has at least one program point.  If there are none between
+// two anchors, as when B directly follows A and uses X early, the anchors
+// are connected directly.  Their chains are merged, if possible, before
+// the searches begin.
 // Links end at the end of a basic block and are connected to the
 // links for the same variable at the start of the following blocks.
 // Thus there are no parallel links: at each program point a variable
@@ -91,8 +95,11 @@
 // individually, from the lower end up.  The first that can't be put in
 // a chain is spilled, along with any links above it that only lead to
 // spilled links.  Other links above it are left for other paths.  Any
-// link that never ends up in a chain is in memory.  There is no
-// backtracking.  The search priorities are intended to make the
+// link that never ends up in a chain is in memory.  When merging is done
+// every link is in a chain, which is in a register, or is a source link,
+// or is in memory.  The allocator keeps the set of links that are not in
+// chains, so that the move finder does not have to look for them.
+// There is no backtracking.  The search priorities are intended to make the
 // link that does not get a register the right one to spill.
 //
 // Some values do not start out in registers assigned by the allocator.
@@ -210,9 +217,19 @@ type linkT struct {
 	followsAnchor bool
 	// If non-nil the value is moved from this link to a fixed register.  The
 	// link can be the end of a path just as a chain can.
-	fixedUse  *RegisterClassT
+	fixedUse *RegisterClassT
+	// The uses of the value in fixed registers at which this link holds the
+	// value.  A link may reach several, as there may be no anchors between
+	// them.  A value that starts in a fixed register has a source link.
+	fixedUses []fixedUseT
 	searches  []*searchT // searches that may be using this link
 	loopDepth int        // depth of the innermost loop containing the link
+}
+
+// The value is moved to 'register' as part of 'call'.
+type fixedUseT struct {
+	call     *CallNodeT
+	register RegisterT
 }
 
 var nextLinkIdx = -1
@@ -348,6 +365,7 @@ type regBlockT struct {
 	endIndex   int // program point after the late phase of 'end'
 	callCount  int // number of calls in the block
 	next       []*regBlockT
+	calls      []*CallNodeT
 
 	seen        bool
 	loop        *regLoopT                 // innermost loop containing this block, if any
@@ -377,6 +395,7 @@ func (block *regBlockT) initialize(start *CallNodeT, end *CallNodeT) {
 	block.start = start
 	block.end = end
 	for call := start; ; call = call.Next[0] {
+		Push(&block.calls, call)
 		inputs, outputs := call.Primop.RegisterUsage(call)
 		// The generic primops in primop.go are only for evaluating code.
 		for _, spec := range slices.Concat(inputs, outputs) {
@@ -435,6 +454,11 @@ type allocatorT struct {
 	// from a chain.  These are source links and the last links of constants
 	// that are passed to jumps.
 	rootLinks []*linkT
+	// Links that are not in chains.  Links are added when they are made and
+	// removed when they are put in a chain, so when merging is done these
+	// are the source links and the links that are in memory.  Anchor links
+	// are made in chains and are never here.
+	unchainedLinks util.SetT[*linkT]
 	// The chains that are live at each program point.
 	chainPoints []util.SetT[*chainT]
 	searchQueue *util.PriorityQueueT[*searchT]
@@ -448,7 +472,7 @@ func AllocateRegisters(
 ) *RegAllocationT {
 	makeVarsForLiterals()
 	result := &RegAllocationT{
-		Moves:  map[*CallNodeT]*RegMovesT{},
+		Moves:  RegMoveMapT{},
 		Frames: map[*CallNodeT]*RegFrameT{},
 	}
 	for _, proc := range FindProcs(top) {
@@ -456,9 +480,9 @@ func AllocateRegisters(
 			allVars:   util.NewSet[*VariableT](),
 			allChains: util.NewSet[*chainT](),
 		}
-		allocation := allocator.allocate(proc, classes)
-		maps.Copy(result.Moves, allocation.Moves)
-		result.Frames[proc] = &RegFrameT{allocation.NumSlots, allocation.Registers}
+		moves, regFrame := allocator.allocate(proc, classes)
+		maps.Copy(result.Moves, moves)
+		result.Frames[proc] = regFrame
 	}
 	return result
 }
@@ -490,7 +514,7 @@ func FindProcs(top *CallNodeT) []*CallNodeT {
 func (alloc *allocatorT) allocate(
 	proc *CallNodeT,
 	classes []*RegisterClassT,
-) *procAllocationT {
+) (RegMoveMapT, *RegFrameT) {
 	FindBasicBlocks[*regBlockT](proc, makeRegBlock)
 	blocks := orderBlocks(proc.Block.(*regBlockT))
 	index := 0
@@ -543,9 +567,10 @@ func orderBlocks(start *regBlockT) []*regBlockT {
 // The blocks must be in the order returned by orderBlocks.
 
 func (alloc *allocatorT) makeLinks(blocks []*regBlockT) {
+	alloc.unchainedLinks = util.NewSet[*linkT]()
 	alloc.findClobbers(blocks)
 	findLiveIn(blocks)
-	makeLoopLinks(blocks)
+	alloc.makeLoopLinks(blocks)
 	for _, block := range slices.Backward(blocks) {
 		alloc.findLiveRanges(block.start)
 	}
@@ -567,7 +592,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 	// Sort the variables to get deterministic behavior.
 	for _, vart := range sortedVars(maps.Keys(block.liveOut())) {
 		if block.loop.link(vart) == nil {
-			link := block.makeLink(vart)
+			link := alloc.makeLink(vart, block.loop.depth())
 			block.liveLinks[vart] = &liveLinkT{endIndex: block.endIndex, link: link}
 			block.endLinks[vart] = link
 		}
@@ -590,18 +615,18 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			liveLink := block.liveLinks[vart]
 			source := RegLocationT{Register: spec.Fixed, Constant: vart.constant()}
 			if source == (RegLocationT{}) {
-				vart.definition = alloc.addAnchorLink(vart, start, end, spec.Class, liveLink)
+				vart.definition = alloc.addAnchorLink(block, vart, start, end, spec.Class, liveLink)
 			} else if liveLink != nil {
 				// A source link, not an anchor, as this does not have to be in
 				// a register.  A constant can be loaded when it is needed and
 				// a value in a fixed register is moved out of it.
-				link := block.makeLink(vart)
+				link := alloc.makeLink(vart, block.loop.depth())
 				link.liveRange.add(intervalT{start, end})
 				link.source = &source
 				if spec.Fixed != nil {
 					alloc.addPreference(block, liveLink.link, spec.Fixed)
 				}
-				connectBelow(link, end, liveLink)
+				alloc.connectBelow(block, link, end, liveLink)
 				vart.definition = link
 				Push(&alloc.rootLinks, link)
 			}
@@ -614,11 +639,15 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 		}
 		// Values that are moved to fixed registers have no anchors.  They just
 		// need to be live at the call's early point.
+		fixedInputs := []*VariableT{}
+		fixedRegisters := []RegisterT{}
 		for i, spec := range block.inputSpecs[callIndex] {
 			if spec != nil && spec.Fixed != nil {
 				vart := call.Inputs[i].(*ReferenceNodeT).Variable
+				Push(&fixedInputs, vart)
+				Push(&fixedRegisters, spec.Fixed)
 				if block.liveLinks[vart] == nil {
-					link := block.makeLink(vart)
+					link := alloc.makeLink(vart, block.loop.depth())
 					block.liveLinks[vart] = &liveLinkT{endIndex: lateIndex, link: link}
 				}
 				// This is set even if the value is used later.  The use may be
@@ -629,6 +658,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				alloc.addPreference(block, link, spec.Fixed)
 			}
 		}
+		anchors := map[*VariableT]*linkT{}
 		for _, input := range inputs {
 			vart := input.variable
 			start := lateIndex + EarlyRegUse
@@ -637,13 +667,24 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 			if liveLink != nil && end != lateIndex+1 {
 				liveLink.link.followsAnchor = true
 			}
-			link := alloc.addAnchorLink(vart, start, end, input.class, liveLink)
+			link := alloc.addAnchorLink(block, vart, start, end, input.class, liveLink)
+			anchors[vart] = link
 			for _, index := range input.argIndexes {
 				vart.addUse(call.Inputs[index], link)
 			}
-			connectLink := block.makeLink(vart)
+			connectLink := alloc.makeLink(vart, block.loop.depth())
 			joinLinks(connectLink, link)
 			block.liveLinks[vart] = &liveLinkT{endIndex: start, link: connectLink}
+		}
+		// The link that has the value at the call's early point is the
+		// anchor, if the value is also used in a register that the allocator
+		// assigns.
+		for i, vart := range fixedInputs {
+			link := anchors[vart]
+			if link == nil {
+				link = block.liveLinks[vart].link
+			}
+			Push(&link.fixedUses, fixedUseT{call, fixedRegisters[i]})
 		}
 		callIndex -= 1
 		lateIndex -= 2
@@ -651,15 +692,25 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 
 	// Each has its own link, so the order does not matter.
 	for _, liveLink := range block.liveLinks {
-		// They are equal if the variable is used early in the first call.
 		if block.startIndex < liveLink.endIndex {
 			liveLink.link.liveRange.add(intervalT{block.startIndex, liveLink.endIndex})
+		} else {
+			// The variable is used early in the first call, so the block starts
+			// with that use's anchor.
+			empty := liveLink.link
+			liveLink.link = empty.ends[0]
+			liveLink.link.starts = nil
+			alloc.removeLink(empty, liveLink.link)
 		}
 	}
 }
 
-func (block *regBlockT) makeLink(vart *VariableT) *linkT {
-	return &linkT{id: nextLinkId(), variable: vart, loopDepth: block.loop.depth()}
+// Every link other than an anchor is made here, which puts it in the set
+// of links that are not in chains.
+func (alloc *allocatorT) makeLink(vart *VariableT, loopDepth int) *linkT {
+	link := &linkT{id: nextLinkId(), variable: vart, loopDepth: loopDepth}
+	alloc.unchainedLinks.Add(link)
+	return link
 }
 
 // Connect the links at the end of this block to those at the starts of
@@ -779,6 +830,7 @@ func getInputs(call *CallNodeT, specs []*RegUseSpecT) []*callInputT {
 }
 
 func (alloc *allocatorT) addAnchorLink(
+	block *regBlockT,
 	vart *VariableT,
 	start int,
 	end int,
@@ -792,7 +844,7 @@ func (alloc *allocatorT) addAnchorLink(
 	}
 	// It's nil if vart is never referenced.
 	if liveLink != nil {
-		connectBelow(link, end, liveLink)
+		alloc.connectBelow(block, link, end, liveLink)
 	}
 	chain := newChain(link, class)
 	chain.allowed = alloc.allowedRegisters(&link.liveRange, class)
@@ -803,7 +855,7 @@ func (alloc *allocatorT) addAnchorLink(
 func (alloc *allocatorT) findClobbers(blocks []*regBlockT) {
 	alloc.clobbers = map[int][]RegisterT{}
 	for _, block := range blocks {
-		for i, call := range block.calls() {
+		for i, call := range block.calls {
 			primop, ok := call.Primop.(ClobbersRegistersT)
 			if ok {
 				alloc.clobbers[block.startIndex+2*i+1] = primop.ClobberedRegisters(call)
@@ -841,10 +893,39 @@ func (alloc *allocatorT) addPreference(block *regBlockT, link *linkT, register R
 	Push(&alloc.preferences, preferenceT{link, register, block.loop.depth() + 1})
 }
 
-// Connect a link that ends at 'end' to the one below it.
-func connectBelow(link *linkT, end int, liveLink *liveLinkT) {
+// Connect a link that ends at 'end' to the one below it.  If the one below
+// would have no program points, 'link' takes its place.  Two anchors may
+// then be connected, and their chains are merged by startMerge.
+func (alloc *allocatorT) connectBelow(block *regBlockT, link *linkT, end int, liveLink *liveLinkT) {
+	below := liveLink.link
 	if liveLink.endIndex != end {
-		liveLink.link.liveRange.add(intervalT{end, liveLink.endIndex})
+		below.liveRange.add(intervalT{end, liveLink.endIndex})
+		joinLinks(link, below)
+		return
 	}
-	joinLinks(link, liveLink.link)
+	for _, next := range below.ends {
+		next.starts[slices.Index(next.starts, below)] = link
+		Push(&link.ends, next)
+	}
+	if block.endLinks[below.variable] == below {
+		block.endLinks[below.variable] = link
+	}
+	replacement := link
+	if len(below.ends) == 1 {
+		replacement = below.ends[0] // an anchor, unlike a source link
+	}
+	alloc.removeLink(below, replacement)
+}
+
+// Links are made before it is known where they start, so some turn out to
+// have no program points.  These are removed, and 'replacement' gets their
+// fixed uses and preferences.
+func (alloc *allocatorT) removeLink(empty *linkT, replacement *linkT) {
+	alloc.unchainedLinks.Remove(empty)
+	replacement.fixedUses = append(replacement.fixedUses, empty.fixedUses...)
+	for i := range alloc.preferences {
+		if alloc.preferences[i].link == empty {
+			alloc.preferences[i].link = replacement
+		}
+	}
 }

@@ -161,7 +161,8 @@ func TestMergeBranches(t *testing.T) {
 			if len(alloc.allChains) != 2 {
 				t.Errorf("got %d chains, expected 2", len(alloc.allChains))
 			}
-			if len(alloc.findMoves(blocks).Moves) != 0 {
+			moves, _ := alloc.findMoves(blocks)
+			if len(moves) != 0 {
 				t.Errorf("unexpected moves")
 			}
 		})
@@ -215,7 +216,7 @@ func TestMergeJump(t *testing.T) {
 		t.Errorf("b and q are in the same register")
 	}
 	// The other is copied.
-	moves := alloc.findMoves([]*regBlockT{entry, target}).Moves
+	moves, _ := alloc.findMoves([]*regBlockT{entry, target})
 	if len(moves) != 1 || len(moves[entry.end].Before) != 0 || len(moves[entry.end].At) != 1 {
 		t.Errorf("wrong moves")
 	}
@@ -491,10 +492,10 @@ func TestMergeDeterministic(t *testing.T) {
 			}
 			result += "\n"
 		}
-		allocation := alloc.findMoves(blocks)
+		regMoves, _ := alloc.findMoves(blocks)
 		for _, block := range blocks {
-			for _, call := range block.calls() {
-				moves := allocation.Moves[call]
+			for _, call := range block.calls {
+				moves := regMoves[call]
 				if moves != nil {
 					result += fmt.Sprintf("%v\n", *moves)
 				}
@@ -567,7 +568,7 @@ func simulate(
 	arguments := []int{} // from the previous block's jump
 	block := start
 	for range maxBlocks {
-		for i, call := range block.calls() {
+		for i, call := range block.calls {
 			isJump := call.Primop.Name() == "jump"
 			callMoves := moves[call]
 			if callMoves != nil {
@@ -668,13 +669,13 @@ func TestMergeRandom(t *testing.T) {
 		}
 		checkLinks(t, alloc)
 		checkAllocation(t, alloc)
-		allocation := alloc.findMoves(blocks)
+		regMoves, frame := alloc.findMoves(blocks)
 		results[kind] += 1
-		if 0 < allocation.NumSlots {
+		if 0 < frame.NumSlots {
 			results[kind+" with spills"] += 1
 		}
 		for range 10 {
-			simulate(t, random, blocks[0], allocation.Moves, 60)
+			simulate(t, random, blocks[0], regMoves, 60)
 		}
 	}
 	useAllocatedFixed(false)
@@ -689,8 +690,11 @@ func TestMergeCancelsSearches(t *testing.T) {
 	vars := testVars("x")
 	block := makeRegBlock()
 	block.addTestCall(nil, EarlyRegUse, vars, LateRegUse)
+	// Anchors in adjacent calls would be merged before the searches start.
+	block.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
 	block.addTestCall(vars, EarlyRegUse, nil, LateRegUse)
 	firstUse := block.end.Inputs[0]
+	block.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
 	block.addTestCall(nil, EarlyRegUse, nil, LateRegUse)
 	block.addTestCall(vars, EarlyRegUse, nil, LateRegUse)
 	alloc := &allocatorT{

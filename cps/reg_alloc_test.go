@@ -85,6 +85,7 @@ func (block *regBlockT) addTestCall(
 		call.parent = block.end
 	}
 	block.end = call
+	Push(&block.calls, call)
 	block.inputSpecs = append(block.inputSpecs, inputSpecs)
 	block.outputSpecs = append(block.outputSpecs, outputSpecs)
 	block.callCount += 1

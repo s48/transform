@@ -186,10 +186,30 @@ func (alloc *allocatorT) startMerge() {
 		alloc.addConflicts(chain, chain.liveRange)
 	}
 	for _, chain := range chains {
+		for _, link := range chain.links {
+			alloc.mergeDirect(link, nil)
+		}
+	}
+	for _, chain := range alloc.sortedChains() {
 		alloc.startSearch(chain)
 	}
 	for _, link := range alloc.rootLinks {
 		alloc.startRootSearch(link)
+	}
+}
+
+// Merges the chain of a link with those of the links below it that are
+// in chains, if possible, other than 'skip'.  There is no path between
+// them for a search to find.  This happens when a value is used early in
+// the call after the one that defines it, or in the first call of a block.
+func (alloc *allocatorT) mergeDirect(link *linkT, skip *chainT) {
+	for _, end := range link.ends {
+		upper := link.chain.root()
+		lower := end.chain.root()
+		if lower != nil && lower != upper && lower != skip && lower.class == upper.class &&
+			alloc.canMerge([]*chainT{upper, lower}, &liveRangeT{}, lower.class) {
+			alloc.mergePath([]*chainT{upper, lower}, nil, &liveRangeT{}, lower.class)
+		}
 	}
 }
 
@@ -394,6 +414,9 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 	for _, chains := range choices {
 		if alloc.canMerge(chains, live, class) {
 			chain := alloc.mergePath(chains, links, live, class)
+			for _, link := range links {
+				alloc.mergeDirect(link, lower.root())
+			}
 			// The links below these may have changed.  The lower chain is
 			// unchanged if it was not merged.
 			alloc.startSearch(chain)
@@ -513,6 +536,9 @@ func (alloc *allocatorT) mergePath(
 	}
 	for _, link := range unadded {
 		chain.addLink(link)
+	}
+	for _, link := range path {
+		alloc.unchainedLinks.Remove(link)
 	}
 	chain.allowed = allowed
 	alloc.addConflicts(chain, live)

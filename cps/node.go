@@ -627,7 +627,7 @@ func CheckNode(topCall *CallNodeT) {
 				}
 				if next.Parent() != node || next.Index() != i {
 					PpCps(node)
-					panic(fmt.Sprintf("bad parent pointer %+v %+v", next))
+					panic(fmt.Sprintf("bad parent pointer %+v %+v", node, next))
 				}
 				check(next, node)
 			}

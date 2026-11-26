@@ -46,29 +46,10 @@ func (loop *regLoopT) link(vart *VariableT) *linkT {
 	return nil
 }
 
-// The innermost loop containing both blocks, or nil.
-func commonLoop(x *regBlockT, y *regBlockT) *regLoopT {
-	for loop := x.loop; loop != nil; loop = loop.parent {
-		if slices.Contains(loop.blocks, y) {
-			return loop
-		}
-	}
-	return nil
-}
-
-func (block *regBlockT) calls() []*CallNodeT {
-	calls := []*CallNodeT{}
-	for call := block.end; len(calls) < block.callCount; call = call.parent {
-		Push(&calls, call)
-	}
-	slices.Reverse(calls)
-	return calls
-}
-
 // Calls the procedures with every variable that is referenced or bound in
 // the block and is in a register, in execution order.
 func (block *regBlockT) walkVars(reference func(*VariableT), bind func(*VariableT)) {
-	for i, call := range block.calls() {
+	for i, call := range block.calls {
 		for _, input := range getInputs(call, block.inputSpecs[i]) {
 			reference(input.variable)
 		}
@@ -122,7 +103,7 @@ func findLiveIn(blocks []*regBlockT) {
 		block.liveIn = util.NewSet[*VariableT]()
 		block.liveOutputs = util.NewSet[*VariableT]()
 		bound[block] = util.NewSet[*VariableT]()
-		for i, call := range block.calls() {
+		for i, call := range block.calls {
 			if call.Primop.Name() != "jump" {
 				for _, input := range getInputs(call, block.inputSpecs[i]) {
 					addLive(block, input.variable)
@@ -161,17 +142,13 @@ func (block *regBlockT) isOutput(vart *VariableT) bool {
 // Any variable that is live in a loop and not bound in it is live at the
 // loop's header and throughout the loop.
 
-func makeLoopLinks(blocks []*regBlockT) {
+func (alloc *allocatorT) makeLoopLinks(blocks []*regBlockT) {
 	for _, loop := range findRegLoops(blocks) {
 		for _, vart := range sortedVars(maps.Keys(loop.header.liveIn)) {
 			if loop.referenced.Contains(vart) || loop.parent.link(vart) != nil {
 				continue
 			}
-			link := &linkT{
-				id:        nextLinkId(),
-				variable:  vart,
-				loopDepth: loop.parent.depth(),
-			}
+			link := alloc.makeLink(vart, loop.parent.depth())
 			for _, block := range slices.Backward(loop.blocks) {
 				link.liveRange.add(intervalT{block.startIndex, block.endIndex})
 			}

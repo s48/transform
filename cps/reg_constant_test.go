@@ -28,16 +28,16 @@ func TestConstantInRegister(t *testing.T) {
 	block, c := constantTestBlock()
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
 	// It is loaded right after where it is bound, and stays in a register.
 	use := c.ReferenceRegister(block.end.Inputs[0])
 	expected := []RegMoveT{{RegLocationT{Constant: c.constant()}, RegLocationT{Register: use}}}
-	moves := allocation.Moves[block.calls()[1]]
-	if len(allocation.Moves) != 1 || moves == nil || !slices.Equal(moves.Before, expected) ||
-		allocation.NumSlots != 0 {
+	moves := regMoves[block.calls[1]]
+	if len(regMoves) != 1 || moves == nil || !slices.Equal(moves.Before, expected) ||
+		frame.NumSlots != 0 {
 		t.Errorf("wrong moves")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // Without a register for it the constant is loaded just where it is used.
@@ -46,18 +46,18 @@ func TestConstantLoaded(t *testing.T) {
 	block, c := constantTestBlock()
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
 	if c.Register() != nil {
 		t.Errorf("constant should not be loaded where it is bound")
 	}
 	use := c.ReferenceRegister(block.end.Inputs[0])
 	expected := []RegMoveT{{RegLocationT{Constant: c.constant()}, RegLocationT{Register: use}}}
-	moves := allocation.Moves[block.end]
-	if allocation.NumSlots != 0 || len(allocation.Moves) != 1 || moves == nil ||
+	moves := regMoves[block.end]
+	if frame.NumSlots != 0 || len(regMoves) != 1 || moves == nil ||
 		!slices.Equal(moves.Before, expected) {
 		t.Errorf("wrong moves")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // Output p's value only comes from constants.
@@ -80,24 +80,24 @@ func TestConstantArguments(t *testing.T) {
 	blocks[2].makeTestJump(blocks[3])
 	alloc := allocateTestBlocks(blocks)
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves(blocks)
+	regMoves, frame := alloc.findMoves(blocks)
 	// The constants are loaded directly into p's register at the jumps.
 	pRegister := RegLocationT{Register: p.ReferenceRegister(blocks[3].end.Inputs[0])}
 	for i, constant := range []*VariableT{c, d} {
 		jump := blocks[i+1].end
 		expected := []RegMoveT{{RegLocationT{Constant: constant.constant()}, pRegister}}
-		moves := allocation.Moves[jump]
+		moves := regMoves[jump]
 		// Either before the jump or as part of it.
 		if moves == nil || !slices.Equal(slices.Concat(moves.Before, moves.At), expected) {
 			t.Errorf("wrong moves for %s", constant.Name)
 		}
 	}
-	if len(allocation.Moves) != 2 || allocation.NumSlots != 0 {
+	if len(regMoves) != 2 || frame.NumSlots != 0 {
 		t.Errorf("wrong moves")
 	}
 	random := rand.New(rand.NewSource(1))
 	for range 10 {
-		simulate(t, random, blocks[0], allocation.Moves, 10)
+		simulate(t, random, blocks[0], regMoves, 10)
 	}
 }
 
@@ -116,9 +116,9 @@ func TestConstantPriority(t *testing.T) {
 	block.addTestCall(vars[:1], EarlyRegUse, nil, LateRegUse)
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
-	if allocation.NumSlots != 0 {
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
+	if frame.NumSlots != 0 {
 		t.Errorf("v should not be spilled")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }

@@ -4,14 +4,17 @@
 // Finding the moves, loads, and stores that are needed when connected
 // links are in different chains or not in chains at all.
 //
-// A value that is not in a register at some point is in a slot in memory.
-// It is stored in the slot when it is created and is loaded from there
-// where a link that is not in a chain is followed by one that is.  Constants
-// have no slots and are just loaded.
+// A link's location is its source, its chain's register, its constant, or
+// its variable's slot.  A move or load is needed where a link in a chain
+// follows one with a different location, at the joint between them.
+// Joints between blocks are done for each edge, as a joint at the start
+// of a JumpLambda may be for several jumps.  A value that is ever in
+// memory is stored when it is created.
 
 package cps
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 
@@ -21,20 +24,15 @@ import (
 // What the back end needs to know, other than which registers are used
 // for which variables.
 type RegAllocationT struct {
-	Moves  map[*CallNodeT]*RegMovesT
+	Moves  RegMoveMapT
 	Frames map[*CallNodeT]*RegFrameT // for each procedure
 }
+
+type RegMoveMapT map[*CallNodeT]*RegMovesT
 
 type RegFrameT struct {
 	NumSlots  int         // slots in memory
 	Registers []RegisterT // all registers assigned in the procedure
-}
-
-// The result for a single procedure.
-type procAllocationT struct {
-	Moves     map[*CallNodeT]*RegMovesT
-	NumSlots  int
-	Registers []RegisterT
 }
 
 // The moves that have to happen at a call.  The moves in each slice are
@@ -62,42 +60,48 @@ type RegLocationT struct {
 }
 
 type moveFinderT struct {
-	blocks []*regBlockT
-	// The link for each variable that is live at each program point.
-	pointLinks []map[*VariableT]*linkT
-	// Program points where each variable is live.
-	varPoints map[*VariableT]util.SetT[int]
-	slots     map[*VariableT]int // for variables that are in memory
-	moves     map[*CallNodeT]*RegMovesT
+	blocks     []*regBlockT
+	pointCalls []*CallNodeT // the call at each pair of program points
+	// For each variable that may be in a slot, the others that are live at
+	// the same time.
+	varConflicts map[*VariableT]util.SetT[*VariableT]
+	// Variables with a link in memory.
+	inMemory util.SetT[*VariableT]
+	slots    map[*VariableT]int // for variables that are in memory
+	moves    RegMoveMapT
 }
 
-func (alloc *allocatorT) findMoves(blocks []*regBlockT) *procAllocationT {
+func (alloc *allocatorT) findMoves(blocks []*regBlockT) (RegMoveMapT, *RegFrameT) {
 	finder := &moveFinderT{
 		blocks:     blocks,
-		pointLinks: make([]map[*VariableT]*linkT, alloc.numProgramPoints),
-		varPoints:  map[*VariableT]util.SetT[int]{},
-		moves:      map[*CallNodeT]*RegMovesT{},
+		pointCalls: make([]*CallNodeT, alloc.numProgramPoints/2),
+		inMemory:   util.NewSet[*VariableT](),
+		moves:      RegMoveMapT{},
 	}
-	for i := range finder.pointLinks {
-		finder.pointLinks[i] = map[*VariableT]*linkT{}
-	}
-	for _, link := range alloc.allLinks() {
-		points := finder.varPoints[link.variable]
-		if points == nil {
-			points = util.NewSet[int]()
-			finder.varPoints[link.variable] = points
-		}
-		for _, interval := range link.liveRange.intervals {
-			for i := interval.start; i < interval.end; i++ {
-				finder.pointLinks[i][link.variable] = link
-				points.Add(i)
-			}
-		}
-	}
-	numSlots := finder.assignSlots(finder.findSlotGroups())
 	for _, block := range blocks {
-		finder.findBlockMoves(block)
+		copy(finder.pointCalls[block.startIndex/2:], block.calls)
 	}
+	links := alloc.allLinks()
+	for link := range alloc.unchainedLinks {
+		if link.source == nil {
+			finder.inMemory.Add(link.variable)
+		}
+	}
+	numSlots := finder.assignSlots(finder.findSlotGroups(links))
+
+	for _, link := range links {
+		if link.chain != nil {
+			finder.joinMoves(link)
+		}
+		for _, use := range link.fixedUses {
+			finder.addMoves(use.call, true, RegMoveT{finder.location(link), RegLocationT{Register: use.register}})
+		}
+	}
+	for _, block := range blocks {
+		finder.findStores(block)
+		finder.findEdgeMoves(block)
+	}
+
 	registers := []RegisterT{}
 	for _, chain := range alloc.sortedChains() {
 		if !slices.Contains(registers, chain.Register) {
@@ -105,33 +109,19 @@ func (alloc *allocatorT) findMoves(blocks []*regBlockT) *procAllocationT {
 		}
 	}
 	slices.SortFunc(registers, func(x, y RegisterT) int { return x.Number() - y.Number() })
-	return &procAllocationT{finder.moves, numSlots, registers}
+	return finder.moves, &RegFrameT{numSlots, registers}
 }
 
+// The links in chains, which are in registers, and those that are not,
+// which are source links or in memory.
 func (alloc *allocatorT) allLinks() []*linkT {
 	links := []*linkT{}
-	seen := util.NewSet[*linkT]()
-	add := func(link *linkT) {
-		if !seen.Contains(link) {
-			seen.Add(link)
-			Push(&links, link)
-		}
-	}
 	for _, chain := range alloc.sortedChains() {
-		for _, link := range chain.links {
-			add(link)
-		}
+		links = append(links, chain.links...)
 	}
-	// Some values never get to a chain.
-	for _, link := range alloc.rootLinks {
-		add(link)
-	}
-	for i := 0; i < len(links); i++ {
-		for _, next := range slices.Concat(links[i].starts, links[i].ends) {
-			add(next)
-		}
-	}
-	return links
+	// Sort the links to get deterministic behavior.
+	return append(links, slices.SortedFunc(maps.Keys(alloc.unchainedLinks),
+		func(x, y *linkT) int { return x.id - y.id })...)
 }
 
 //----------------------------------------------------------------
@@ -142,39 +132,39 @@ func (alloc *allocatorT) allLinks() []*linkT {
 // if the two have different values that are needed at the same time.
 
 type slotGroupT struct {
-	vars   []*VariableT
-	points util.SetT[int] // where any of the variables are live
+	vars      []*VariableT
+	conflicts util.SetT[*VariableT] // variables live at the same time as any of these
 }
 
-func (finder *moveFinderT) findSlotGroups() []*slotGroupT {
+func (finder *moveFinderT) findSlotGroups(links []*linkT) []*slotGroupT {
 	// The arguments passed to JumpLambda outputs.
 	arguments := map[*VariableT][]*VariableT{}
 	for _, block := range finder.blocks {
 		for i, argument := range block.jumpArgs {
 			output := block.next[0].start.Outputs[i]
 			if argument != nil && argument.constant() == nil &&
-				finder.varPoints[output] != nil {
+				block.next[0].outputLink(i) != nil {
 				arguments[output] = append(arguments[output], argument)
 			}
 		}
 	}
 
+	// The variables that may be in slots.
+	candidates := maps.Clone(finder.inMemory)
+	for _, args := range arguments {
+		candidates.Add(args...)
+	}
+	finder.findConflicts(links, candidates)
+
 	groups := map[*VariableT]*slotGroupT{}
 	todo := []*VariableT{}
 	addVar := func(vart *VariableT) {
-		groups[vart] = &slotGroupT{[]*VariableT{vart}, maps.Clone(finder.varPoints[vart])}
+		groups[vart] = &slotGroupT{[]*VariableT{vart}, maps.Clone(finder.varConflicts[vart])}
 		Push(&todo, vart)
 	}
-	for _, vart := range sortedVars(maps.Keys(finder.varPoints)) {
-		if vart.constant() != nil {
-			continue
-		}
-		for point := range finder.varPoints[vart] {
-			link := finder.pointLinks[point][vart]
-			if link.chain == nil && link.source == nil {
-				addVar(vart)
-				break
-			}
+	for _, vart := range sortedVars(maps.Keys(finder.inMemory)) {
+		if vart.constant() == nil {
+			addVar(vart)
 		}
 	}
 	for i := 0; i < len(todo); i++ {
@@ -185,18 +175,18 @@ func (finder *moveFinderT) findSlotGroups() []*slotGroupT {
 			if other == group {
 				continue
 			}
-			points := finder.varPoints[argument]
+			vars := []*VariableT{argument}
 			if other != nil {
-				points = other.points
+				vars = other.vars
 			}
-			if setsOverlap(group.points, points) {
+			if slices.ContainsFunc(vars, group.conflicts.Contains) {
 				continue
 			}
 			if other == nil {
 				addVar(argument)
 				other = groups[argument]
 			}
-			group.points.AddSet(other.points)
+			group.conflicts.AddSet(other.conflicts)
 			for _, vart := range other.vars {
 				groups[vart] = group
 				Push(&group.vars, vart)
@@ -213,149 +203,184 @@ func (finder *moveFinderT) findSlotGroups() []*slotGroupT {
 	return result
 }
 
-func setsOverlap(x util.SetT[int], y util.SetT[int]) bool {
-	if len(y) < len(x) {
-		x, y = y, x
+// One of a variable's live intervals.
+type varIntervalT struct {
+	vart     *VariableT
+	interval intervalT
+}
+
+// Finds which of the variables are live at the same time, by going through
+// the starts and ends of their links' intervals in order.  An interval's
+// end is exclusive, so at each program point the ends are done before the
+// starts.
+func (finder *moveFinderT) findConflicts(links []*linkT, vars util.SetT[*VariableT]) {
+	finder.varConflicts = map[*VariableT]util.SetT[*VariableT]{}
+	for vart := range vars {
+		finder.varConflicts[vart] = util.NewSet[*VariableT]()
 	}
-	for i := range x {
-		if y.Contains(i) {
-			return true
+	starts := []varIntervalT{}
+	for _, link := range links {
+		if vars.Contains(link.variable) {
+			for _, interval := range link.liveRange.intervals {
+				Push(&starts, varIntervalT{link.variable, interval})
+			}
 		}
 	}
-	return false
+	ends := slices.Clone(starts)
+	slices.SortFunc(starts, func(x, y varIntervalT) int { return x.interval.start - y.interval.start })
+	slices.SortFunc(ends, func(x, y varIntervalT) int { return x.interval.end - y.interval.end })
+
+	liveVars := util.NewSet[*VariableT]()
+	endIndex := 0
+	for _, start := range starts {
+		for ends[endIndex].interval.end <= start.interval.start {
+			liveVars.Remove(ends[endIndex].vart)
+			endIndex += 1
+		}
+		vart := start.vart
+		finder.varConflicts[vart].AddSet(liveVars)
+		for other := range liveVars {
+			finder.varConflicts[other].Add(vart)
+		}
+		liveVars.Add(vart)
+	}
 }
 
 // Groups that are not live at the same time can share a slot.  Returns
 // the number of slots.
 func (finder *moveFinderT) assignSlots(groups []*slotGroupT) int {
 	finder.slots = map[*VariableT]int{}
-	slotPoints := []util.SetT[int]{}
+	slotConflicts := []util.SetT[*VariableT]{}
 	for _, group := range groups {
-		slot := slices.IndexFunc(slotPoints, func(points util.SetT[int]) bool {
-			return !setsOverlap(points, group.points)
+		slot := slices.IndexFunc(slotConflicts, func(conflicts util.SetT[*VariableT]) bool {
+			return !slices.ContainsFunc(group.vars, conflicts.Contains)
 		})
 		if slot < 0 {
-			slot = len(slotPoints)
-			Push(&slotPoints, util.NewSet[int]())
+			slot = len(slotConflicts)
+			Push(&slotConflicts, util.NewSet[*VariableT]())
 		}
-		slotPoints[slot].AddSet(group.points)
+		slotConflicts[slot].AddSet(group.conflicts)
 		for _, vart := range group.vars {
 			finder.slots[vart] = slot
 		}
 	}
-	return len(slotPoints)
+	return len(slotConflicts)
 }
 
 //----------------------------------------------------------------
 
-func (finder *moveFinderT) callMoves(call *CallNodeT) *RegMovesT {
-	moves := finder.moves[call]
-	if moves == nil {
-		moves = &RegMovesT{}
-		finder.moves[call] = moves
-	}
-	return moves
-}
-
-func (finder *moveFinderT) addBefore(call *CallNodeT, moves []RegMoveT) {
-	if len(moves) != 0 {
-		callMoves := finder.callMoves(call)
-		for _, move := range moves {
+// Adds the moves to those done before the call or, if 'at' is true, as
+// part of it.
+func (finder *moveFinderT) addMoves(call *CallNodeT, at bool, moves ...RegMoveT) {
+	for _, move := range moves {
+		if move.From == move.To {
+			continue
+		}
+		callMoves := finder.moves[call]
+		if callMoves == nil {
+			callMoves = &RegMovesT{}
+			finder.moves[call] = callMoves
+		}
+		if at {
+			callMoves.At = addMove(callMoves.At, move.From, move.To)
+		} else {
 			callMoves.Before = addMove(callMoves.Before, move.From, move.To)
 		}
 	}
 }
 
-// Links only change between calls, or between blocks, so we can just look
-// for any variable whose location changes there.
-//
-// If the next block is a JumpLambda then this one ends in a jump, and the
-// moves are done there.  Otherwise the next block has no other
-// predecessors and the moves are done before its first call.
-
-func (finder *moveFinderT) findBlockMoves(block *regBlockT) {
-	calls := block.calls()
-	for i, call := range calls {
-		point := block.startIndex + 2*i // early
-		if i != 0 {
-			live := util.NewSet[*VariableT]()
-			for vart := range finder.pointLinks[point-1] {
-				if finder.pointLinks[point][vart] != nil {
-					live.Add(vart)
-				}
-			}
-			finder.addBefore(call, finder.movesBetween(live, point-1, point))
-		}
-		stores := finder.findStores(call, block.outputSpecs[i])
-		fixedMoves := []RegMoveT{}
-		for j, spec := range block.inputSpecs[i] {
-			if spec != nil && spec.Fixed != nil {
-				vart := call.Inputs[j].(*ReferenceNodeT).Variable
-				fixedMoves = addMove(fixedMoves, finder.location(vart, point), RegLocationT{Register: spec.Fixed})
-			}
-		}
-		if len(fixedMoves) != 0 {
-			moves := finder.callMoves(call)
-			moves.At = append(moves.At, fixedMoves...)
-		}
-		if i != len(calls)-1 {
-			finder.addBefore(calls[i+1], stores)
-		} else {
-			for _, next := range block.next {
-				finder.addBefore(next.start, stores)
-			}
-		}
+// The moves into a link in a chain from the links above it, when the
+// joint is within a block.  Those at the start of a block are done by
+// findEdgeMoves.
+func (finder *moveFinderT) joinMoves(link *linkT) {
+	intervals := link.liveRange.intervals
+	point := intervals[len(intervals)-1].start
+	call := finder.pointCalls[point/2]
+	if point%2 == 0 && call.Block != nil {
+		return // at the start of a block
 	}
-	isJump := block.end.Primop.Name() == "jump"
-	for _, next := range block.next {
-		// This does not include the outputs of a JumpLambda, even if they are
-		// also live at the end of this block.  They are getting new values.
-		moves := finder.movesBetween(next.liveIn, block.endIndex-1, next.startIndex)
-		if isJump {
-			moves = append(moves, finder.findJumpMoves(block, next)...)
-			if len(moves) != 0 {
-				callMoves := finder.callMoves(block.end)
-				callMoves.At = append(callMoves.At, moves...)
-			}
-		} else {
-			finder.addBefore(next.start, moves)
-		}
-	}
-}
-
-// Moves and loads for variables that are live at both program points.
-// Sort the variables to get deterministic behavior.
-func (finder *moveFinderT) movesBetween(vars util.SetT[*VariableT], from int, to int) []RegMoveT {
-	moves := []RegMoveT{}
-	for _, vart := range sortedVars(maps.Keys(vars)) {
-		if finder.pointLinks[to][vart].chain != nil {
-			moves = addMove(moves, finder.location(vart, from), finder.location(vart, to))
-		}
-	}
-	return moves
-}
-
-// Stores for the outputs of a call.
-func (finder *moveFinderT) findStores(call *CallNodeT, specs []*RegUseSpecT) []RegMoveT {
-	moves := []RegMoveT{}
-	if call.CallType == JumpLambda {
-		return moves // done by the jump
-	}
-	for i, spec := range specs {
-		vart := call.Outputs[i]
-		if spec == nil || vart.definition == nil || vart.constant() != nil {
+	to := finder.location(link)
+	for _, start := range link.starts {
+		from := finder.location(start)
+		if from == to {
 			continue
 		}
-		from := RegLocationT{Register: spec.Fixed} // from its source link
-		if spec.Fixed == nil {
-			from.Register = vart.definition.chain.root().Register
+		if point%2 != 0 {
+			// It follows an anchor that ends at the call's early point.
+			panic(fmt.Sprintf("link %d needs a move within a call", link.id))
 		}
-		slot, found := finder.slots[vart]
-		if found {
-			moves = addMove(moves, from, RegLocationT{Slot: slot})
+		finder.addMoves(call, false, RegMoveT{from, to})
+	}
+}
+
+// The link for a variable at the end of a block, and at the start.
+func (block *regBlockT) endLink(vart *VariableT) *linkT {
+	link := block.loop.link(vart)
+	if link == nil {
+		link = block.endLinks[vart]
+	}
+	return link
+}
+
+func (block *regBlockT) startLink(vart *VariableT) *linkT {
+	link := block.loop.link(vart)
+	if link == nil {
+		link = block.liveLinks[vart].link
+	}
+	return link
+}
+
+// The moves at the joints between this block and the following ones.  If
+// the next block is a JumpLambda then this one ends in a jump, and the
+// moves are done there.  Otherwise the next block has no other
+// predecessors and the moves are done before its first call.
+func (finder *moveFinderT) findEdgeMoves(block *regBlockT) {
+	isJump := block.end.Primop.Name() == "jump"
+	for _, next := range block.next {
+		moves := []RegMoveT{}
+		// This does not include the outputs of a JumpLambda, even if they are
+		// also live at the end of this block.  They are getting new values.
+		// Sort the variables to get deterministic behavior.
+		for _, vart := range sortedVars(maps.Keys(next.liveIn)) {
+			from := block.endLink(vart)
+			to := next.startLink(vart)
+			if from == to {
+				continue // a link around a loop
+			}
+			if to.chain != nil {
+				moves = addMove(moves, finder.location(from), finder.location(to))
+			}
+		}
+		if isJump {
+			finder.addMoves(block.end, true, append(moves, finder.findJumpMoves(block, next)...)...)
+		} else {
+			finder.addMoves(next.start, false, moves...)
 		}
 	}
-	return moves
+}
+
+// Stores for the outputs of the block's calls, done before the next call.
+func (finder *moveFinderT) findStores(block *regBlockT) {
+	for i, call := range block.calls {
+		if call.CallType == JumpLambda {
+			continue // done by the jumps
+		}
+		stores := []RegMoveT{}
+		for j, spec := range block.outputSpecs[i] {
+			vart := call.Outputs[j]
+			slot, found := finder.slots[vart]
+			if spec != nil && vart.definition != nil && found {
+				Push(&stores, RegMoveT{finder.location(vart.definition), RegLocationT{Slot: slot}})
+			}
+		}
+		if i != len(block.calls)-1 {
+			finder.addMoves(block.calls[i+1], false, stores...)
+		} else {
+			for _, next := range block.next {
+				finder.addMoves(next.start, false, stores...)
+			}
+		}
+	}
 }
 
 // The outputs get their values from the arguments.  An output that is in
@@ -364,13 +389,13 @@ func (finder *moveFinderT) findJumpMoves(block *regBlockT, next *regBlockT) []Re
 	moves := []RegMoveT{}
 	for i, argument := range block.jumpArgs {
 		output := next.start.Outputs[i]
-		link := finder.pointLinks[next.startIndex][output]
+		link := next.outputLink(i)
 		if argument == nil || link == nil {
 			continue
 		}
-		from := finder.location(argument, block.endIndex-1)
+		from := finder.location(block.endLinks[argument])
 		if link.chain != nil {
-			moves = addMove(moves, from, finder.location(output, next.startIndex))
+			moves = addMove(moves, from, finder.location(link))
 		}
 		slot, found := finder.slots[output]
 		argumentSlot, argumentFound := finder.slots[argument]
@@ -383,19 +408,18 @@ func (finder *moveFinderT) findJumpMoves(block *regBlockT, next *regBlockT) []Re
 	return moves
 }
 
-func (finder *moveFinderT) location(vart *VariableT, point int) RegLocationT {
-	link := finder.pointLinks[point][vart]
+func (finder *moveFinderT) location(link *linkT) RegLocationT {
 	if link.source != nil {
 		return *link.source
 	}
 	if link.chain != nil {
 		return RegLocationT{Register: link.chain.root().Register}
 	}
-	constant := vart.constant()
+	constant := link.variable.constant()
 	if constant != nil {
 		return RegLocationT{Constant: constant}
 	}
-	return RegLocationT{Slot: finder.slots[vart]}
+	return RegLocationT{Slot: finder.slots[link.variable]}
 }
 
 func addMove(moves []RegMoveT, from RegLocationT, to RegLocationT) []RegMoveT {

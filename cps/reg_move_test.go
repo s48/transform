@@ -26,10 +26,12 @@ func TestMovesRandom(t *testing.T) {
 					// It can only be in the anchor's chain.
 					chain := link.starts[0].chain
 					chain.addLink(link)
+					alloc.unchainedLinks.Remove(link)
 					chain.allowed &= alloc.allowedRegisters(&link.liveRange, testClass)
 					continue
 				}
 				chain := newChain(link, testClass)
+				alloc.unchainedLinks.Remove(link)
 				chain.allowed = alloc.allowedRegisters(&link.liveRange, testClass)
 				alloc.allChains.Add(chain)
 			}
@@ -49,7 +51,7 @@ func TestMovesRandom(t *testing.T) {
 			chain.Register = testClass.firstRegister(available)
 		}
 		checkAllocation(t, alloc)
-		moves := alloc.findMoves(blocks).Moves
+		moves, _ := alloc.findMoves(blocks)
 		for _, callMoves := range moves {
 			count += len(callMoves.Before) + len(callMoves.At)
 		}
@@ -83,12 +85,13 @@ func TestMovePlacement(t *testing.T) {
 	setRegister := func(link *linkT, i int) RegLocationT {
 		if link.chain == nil {
 			alloc.allChains.Add(newChain(link, testClass))
+			alloc.unchainedLinks.Remove(link)
 		}
 		link.chain.Register = testClass.registers[i]
 		return RegLocationT{Register: link.chain.Register}
 	}
 	definition := setRegister(x.definition, 1)
-	use := setRegister(x.uses[blocks[0].calls()[1].Inputs[0]], 2)
+	use := setRegister(x.uses[blocks[0].calls[1].Inputs[0]], 2)
 	// The use's anchor ends at the call's early point, so the link after it
 	// has to be in the same register.
 	end := setRegister(blocks[0].endLinks[x], 2)
@@ -98,12 +101,12 @@ func TestMovePlacement(t *testing.T) {
 	use1 := setRegister(x.uses[blocks[1].end.Inputs[0]], 6)
 	use2 := setRegister(x.uses[blocks[2].end.Inputs[0]], 7)
 
-	moves := alloc.findMoves(blocks).Moves
+	moves, _ := alloc.findMoves(blocks)
 	tests := []struct {
 		call *CallNodeT
 		move RegMoveT
 	}{
-		{blocks[0].calls()[1], RegMoveT{definition, use}},
+		{blocks[0].calls[1], RegMoveT{definition, use}},
 		{blocks[1].start, RegMoveT{end, top}},
 		{blocks[1].end, RegMoveT{top, use1}},
 		{blocks[2].start, RegMoveT{end, use2}},
@@ -151,16 +154,16 @@ func TestSpillAroundLoop(t *testing.T) {
 	blocks := orderBlocks(entry)
 	alloc := allocateTestBlocks(blocks)
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves(blocks)
-	if allocation.NumSlots != 1 {
-		t.Errorf("%d slots, expected 1", allocation.NumSlots)
+	regMoves, frame := alloc.findMoves(blocks)
+	if frame.NumSlots != 1 {
+		t.Errorf("%d slots, expected 1", frame.NumSlots)
 	}
 	slot := RegLocationT{}
 	store := RegMoveT{RegLocationT{Register: a.Register()}, slot}
 	load := RegMoveT{slot, RegLocationT{Register: q.ReferenceRegister(exit.end.Inputs[0])}}
 	for _, block := range blocks {
-		for i, call := range block.calls() {
-			moves := allocation.Moves[call]
+		for i, call := range block.calls {
+			moves := regMoves[call]
 			if moves == nil {
 				moves = &RegMovesT{}
 			}
@@ -180,7 +183,7 @@ func TestSpillAroundLoop(t *testing.T) {
 		}
 	}
 	for range 10 {
-		simulate(t, rand.New(rand.NewSource(1)), entry, allocation.Moves, 20)
+		simulate(t, rand.New(rand.NewSource(1)), entry, regMoves, 20)
 	}
 }
 
@@ -270,8 +273,8 @@ func TestFixedRegisters(t *testing.T) {
 	block.addTestCall([]*VariableT{x, y}, EarlyRegUse, nil, LateRegUse)
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
-	calls := block.calls()
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
+	calls := block.calls
 	fixed := RegLocationT{Register: testFixedRegisters[0]}
 	xRegister := RegLocationT{Register: x.ReferenceRegister(calls[2].Inputs[0])}
 	yRegister := RegLocationT{Register: y.ReferenceRegister(calls[2].Inputs[1])}
@@ -280,7 +283,7 @@ func TestFixedRegisters(t *testing.T) {
 		calls[2]: {Before: []RegMoveT{{fixed, yRegister}}},
 	}
 	for _, call := range calls {
-		moves := allocation.Moves[call]
+		moves := regMoves[call]
 		if moves == nil {
 			moves = &RegMovesT{}
 		}
@@ -288,10 +291,10 @@ func TestFixedRegisters(t *testing.T) {
 			t.Errorf("wrong moves %v", *moves)
 		}
 	}
-	if allocation.NumSlots != 0 {
+	if frame.NumSlots != 0 {
 		t.Errorf("nothing should be spilled")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // A call's result that is only passed to another call is moved directly,
@@ -306,11 +309,11 @@ func TestFixedToFixed(t *testing.T) {
 	block.addTestCall(vars, EarlyRegUse, nil, LateRegUse)
 	setTestFixed(block.inputSpecs[2])
 	alloc := allocateTestBlocks([]*regBlockT{block})
-	allocation := alloc.findMoves([]*regBlockT{block})
-	if allocation.NumSlots != 0 {
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
+	if frame.NumSlots != 0 {
 		t.Errorf("y should not be in memory")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // With fixed registers that can be allocated, values passed to and from
@@ -330,9 +333,9 @@ func TestFixedPreference(t *testing.T) {
 	block.addTestCall([]*VariableT{z}, EarlyRegUse, nil, LateRegUse)
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
-	if len(allocation.Moves) != 0 {
-		for call, moves := range allocation.Moves {
+	regMoves, _ := alloc.findMoves([]*regBlockT{block})
+	if len(regMoves) != 0 {
+		for call, moves := range regMoves {
 			t.Errorf("unexpected moves at %v: %v", call, *moves)
 		}
 	}
@@ -340,7 +343,7 @@ func TestFixedPreference(t *testing.T) {
 		z.ReferenceRegister(block.end.Inputs[0]) != testFixedRegisters[0] {
 		t.Errorf("values are not in their fixed registers")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // Two conflicting chains want the same register.  The one that wants it
@@ -424,11 +427,11 @@ func TestInputsLiveAfter(t *testing.T) {
 	block.addTestCall([]*VariableT{y}, EarlyRegUse, nil, LateRegUse)
 	alloc := allocateTestBlocks([]*regBlockT{block})
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves([]*regBlockT{block})
-	if allocation.NumSlots == 0 {
+	regMoves, frame := alloc.findMoves([]*regBlockT{block})
+	if frame.NumSlots == 0 {
 		t.Errorf("something should be in memory")
 	}
-	simulate(t, rand.New(rand.NewSource(1)), block, allocation.Moves, 1)
+	simulate(t, rand.New(rand.NewSource(1)), block, regMoves, 1)
 }
 
 // v's only use is in a fixed register, in a loop, so its links go around
@@ -454,11 +457,11 @@ func TestFixedUseInLoop(t *testing.T) {
 	blocks := orderBlocks(entry)
 	alloc := allocateTestBlocks(blocks)
 	checkAllocation(t, alloc)
-	allocation := alloc.findMoves(blocks)
-	if allocation.NumSlots != 0 {
+	regMoves, frame := alloc.findMoves(blocks)
+	if frame.NumSlots != 0 {
 		t.Errorf("v should not be in memory")
 	}
 	for range 5 {
-		simulate(t, rand.New(rand.NewSource(1)), entry, allocation.Moves, 10)
+		simulate(t, rand.New(rand.NewSource(1)), entry, regMoves, 10)
 	}
 }
