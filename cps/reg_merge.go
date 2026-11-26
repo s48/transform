@@ -32,9 +32,10 @@ import (
 // variable.
 
 type searchT struct {
-	id        int     // used for making sorts deterministic
-	chain     *chainT // nil if this starts from a link
-	root      *linkT  // the link, if there is no chain
+	id        int             // used for making sorts deterministic
+	class     *RegisterClassT // of the chains and fixed registers it may reach
+	chain     *chainT         // nil if this starts from a link
+	root      *linkT          // the link, if there is no chain
 	leaves    []*searchLinkT
 	shortest  int               // index of the leaf to extend next
 	seen      util.SetT[*linkT] // every link that is or has been a leaf
@@ -153,9 +154,7 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 	leaf := search.removeShortest()
 	if leaf.direct {
 		lower := leaf.link.chain.root()
-		if lower.class != search.chain.class {
-			panic("link between chains with different register classes")
-		}
+		search.checkClass(lower.class)
 		return []*linkT{}, lower
 	}
 	for _, end := range leaf.link.ends {
@@ -163,9 +162,7 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 		if lower == nil {
 			continue
 		}
-		if search.chain != nil && lower.class != search.chain.class {
-			panic("link between chains with different register classes")
-		}
+		search.checkClass(lower.class)
 		path := []*linkT{}
 		for branch := leaf; branch != nil; branch = branch.parent {
 			Push(&path, branch.link)
@@ -173,7 +170,8 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 		slices.Reverse(path)
 		return path, lower
 	}
-	if leaf.link.fixedUse != nil {
+	if len(leaf.link.fixedUses) != 0 {
+		search.checkClass(leaf.link.fixedUses[0].register.Class())
 		path := []*linkT{}
 		for branch := leaf; branch != nil; branch = branch.parent {
 			Push(&path, branch.link)
@@ -187,8 +185,16 @@ func (search *searchT) extend() ([]*linkT, *chainT) {
 
 //----------------------------------------------------------------
 
-// Find the initial conflicts and start a search from every chain.
-func (alloc *allocatorT) startMerge() {
+func (search *searchT) checkClass(class *RegisterClassT) {
+	if class != search.class {
+		panic("link between registers of different classes")
+	}
+}
+
+// Find the initial conflicts and start a search from every chain in the
+// class.  Classes are merged independently, as chains in different
+// classes never conflict and links never connect them.
+func (alloc *allocatorT) startMerge(class *RegisterClassT) {
 	// The queue returns the greatest element first.
 	alloc.searchQueue = util.MakePriorityQueue(func(x *searchT, y *searchT) bool {
 		xLeaf := x.leaves[x.shortest]
@@ -204,20 +210,21 @@ func (alloc *allocatorT) startMerge() {
 	for i := range alloc.chainPoints {
 		alloc.chainPoints[i] = util.NewSet[*chainT]()
 	}
-	chains := alloc.sortedChains()
+	inputs := alloc.classInputs(class)
+	chains := sortChains(inputs.chains)
 	for _, chain := range chains {
 		alloc.addConflicts(chain, chain.liveRange)
 	}
 	for _, chain := range chains {
 		alloc.startSearch(chain)
 	}
-	for _, link := range alloc.rootLinks {
-		alloc.startRootSearch(link)
+	for _, link := range inputs.rootLinks {
+		alloc.startRootSearch(link, class)
 	}
 }
 
-func (alloc *allocatorT) mergeChains() {
-	alloc.startMerge()
+func (alloc *allocatorT) mergeChains(class *RegisterClassT) {
+	alloc.startMerge(class)
 	for !alloc.searchQueue.Empty() {
 		search := alloc.searchQueue.Dequeue()
 		if !search.cancelled {
@@ -241,18 +248,23 @@ func (alloc *allocatorT) extendSearch(search *searchT) {
 		}
 	} else if path != nil {
 		search.cancelled = true // a new one is started if needed
-		alloc.addPath(search.chain, lower, path)
+		alloc.addPath(search.chain, lower, path, search.class)
 		if search.chain == nil {
 			// Does nothing if the link is now in a chain.
-			alloc.startRootSearch(search.root)
+			alloc.startRootSearch(search.root, search.class)
 		}
 	} else if len(search.leaves) != 0 {
 		alloc.searchQueue.Enqueue(search)
 	}
 }
 
+// The chains of all classes.
 func (alloc *allocatorT) sortedChains() []*chainT {
-	return sortChains(alloc.allChains)
+	chains := util.NewSet[*chainT]()
+	for _, inputs := range alloc.classes {
+		chains.AddSet(inputs.chains)
+	}
+	return sortChains(chains)
 }
 
 func sortChains(chains util.SetT[*chainT]) []*chainT {
@@ -330,7 +342,7 @@ func (alloc *allocatorT) restartSearch(search *searchT) {
 // Start or restart the search down from a chain.
 func (alloc *allocatorT) startSearch(chain *chainT) {
 	chain.cancelSearch()
-	search := &searchT{id: nextSearchId(), chain: chain}
+	search := &searchT{id: nextSearchId(), class: chain.class, chain: chain}
 	search.restart()
 	if len(search.leaves) != 0 {
 		chain.search = search
@@ -339,8 +351,8 @@ func (alloc *allocatorT) startSearch(chain *chainT) {
 }
 
 // Start a search down from a link.
-func (alloc *allocatorT) startRootSearch(link *linkT) {
-	search := &searchT{id: nextSearchId(), root: link}
+func (alloc *allocatorT) startRootSearch(link *linkT, class *RegisterClassT) {
+	search := &searchT{id: nextSearchId(), class: class, root: link}
 	search.restart()
 	if len(search.leaves) != 0 {
 		alloc.searchQueue.Enqueue(search)
@@ -359,8 +371,13 @@ func (chain *chainT) cancelSearch() {
 // the lower chain, adding links individually, at the cost of some moves.
 // If we get to one that can't be added then it is spilled.  Any links
 // above that are left for other paths, if there may be any.
-func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
-	if alloc.addLinks(upper, lower, path) != nil {
+func (alloc *allocatorT) addPath(
+	upper *chainT,
+	lower *chainT,
+	path []*linkT,
+	class *RegisterClassT,
+) {
+	if alloc.addLinks(upper, lower, path, class) != nil {
 		return
 	}
 	for i, link := range slices.Backward(path) {
@@ -368,7 +385,7 @@ func (alloc *allocatorT) addPath(upper *chainT, lower *chainT, path []*linkT) {
 		if i != 0 {
 			above = nil
 		}
-		chain := alloc.addLinks(above, lower, path[i:i+1])
+		chain := alloc.addLinks(above, lower, path[i:i+1], class)
 		if chain == nil {
 			alloc.spill(link)
 			break
@@ -396,8 +413,14 @@ func (alloc *allocatorT) spill(link *linkT) {
 
 // Add the links to a chain, merged with one or both of 'upper' and 'lower',
 // or with neither.  'upper' is nil if the links do not lead down from a
-// chain and 'lower' is nil if they lead to a fixed register.  Returns the chain, or nil if this can't be done.
-func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) *chainT {
+// chain and 'lower' is nil if they lead to a fixed register.  Returns the
+// chain, or nil if this can't be done.
+func (alloc *allocatorT) addLinks(
+	upper *chainT,
+	lower *chainT,
+	links []*linkT,
+	class *RegisterClassT,
+) *chainT {
 	live := &liveRangeT{}
 	for _, link := range links {
 		if live.conflicts(&link.liveRange) {
@@ -413,10 +436,6 @@ func (alloc *allocatorT) addLinks(upper *chainT, lower *chainT, links []*linkT) 
 		choices = [][]*chainT{{upper}, {}}
 	} else if upper == nil || upper == lower {
 		choices = [][]*chainT{{lower}, {}}
-	}
-	class := links[len(links)-1].fixedUse
-	if lower != nil {
-		class = lower.class
 	}
 	if links[0].variable.constant() != nil {
 		// Loading it again is as good as a move from a separate chain.
@@ -532,7 +551,7 @@ func (alloc *allocatorT) mergePath(
 	unadded := path
 	if len(chains) == 0 {
 		chain = newChain(path[0], class)
-		alloc.allChains.Add(chain)
+		alloc.addChain(chain)
 		unadded = path[1:]
 	} else {
 		chain = chains[0]
@@ -546,7 +565,7 @@ func (alloc *allocatorT) mergePath(
 		}
 		other.cancelSearch()
 		chain.merge(other)
-		alloc.allChains.Remove(other)
+		alloc.classInputs(class).chains.Remove(other)
 	}
 	for _, link := range unadded {
 		chain.addLink(link)
@@ -567,12 +586,10 @@ func (alloc *allocatorT) mergePath(
 func (alloc *allocatorT) colorChains(class *RegisterClassT) {
 	degrees := map[*chainT]int{}
 	todo := []*chainT{}
-	for _, chain := range alloc.sortedChains() {
-		if chain.class == class {
-			degrees[chain] = len(chain.conflicts)
-			if len(chain.conflicts) < chain.allowed.size() {
-				Push(&todo, chain)
-			}
+	for _, chain := range sortChains(alloc.classInputs(class).chains) {
+		degrees[chain] = len(chain.conflicts)
+		if len(chain.conflicts) < chain.allowed.size() {
+			Push(&todo, chain)
 		}
 	}
 	for i := 0; i < len(todo); i++ {

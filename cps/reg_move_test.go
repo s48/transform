@@ -33,10 +33,10 @@ func TestMovesRandom(t *testing.T) {
 				chain := newChain(link, testClass)
 				alloc.unchainedLinks.Remove(link)
 				chain.allowed = alloc.allowedRegisters(&link.liveRange, testClass)
-				alloc.allChains.Add(chain)
+				alloc.addChain(chain)
 			}
 		}
-		alloc.startMerge()
+		alloc.startMerge(testClass)
 		// Do only the empty paths, which merge directly connected chains.
 		// Those come first, so the searches still in the queue after them
 		// have none.
@@ -93,7 +93,7 @@ func TestMovePlacement(t *testing.T) {
 	}
 	setRegister := func(link *linkT, i int) RegLocationT {
 		if link.chain == nil {
-			alloc.allChains.Add(newChain(link, testClass))
+			alloc.addChain(newChain(link, testClass))
 			alloc.unchainedLinks.Remove(link)
 		}
 		link.chain.Register = testClass.registers[i]

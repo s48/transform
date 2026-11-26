@@ -228,8 +228,12 @@ func (primop *JumpPrimopT) Name() string             { return "jump" }
 func (primop *JumpPrimopT) SideEffects() bool        { return false }
 func (primop *JumpPrimopT) Simplify(call *CallNodeT) { SimplifyJump(call) }
 func (primop *JumpPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
-	inputs, outputs := registerUsageSpec(call, jumpRegUseSpec, nil)
-	inputs[0] = nil // the jump target does not need a register
+	// The arguments are in registers, including literals, which get
+	// loadReg calls of their own.  The jump target does not need one.
+	inputs, outputs := registerUsageSpec(call, nil, nil)
+	for i := 1; i < len(inputs); i++ {
+		inputs[i] = jumpRegUseSpec
+	}
 	return inputs, outputs
 }
 func (primop *JumpPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT) {

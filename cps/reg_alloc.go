@@ -215,12 +215,10 @@ type linkT struct {
 	// call's early point.  As moves are only possible between calls, this
 	// can only be in the anchor's chain or in memory.
 	followsAnchor bool
-	// If non-nil the value is moved from this link to a fixed register.  The
-	// link can be the end of a path just as a chain can.
-	fixedUse *RegisterClassT
 	// The uses of the value in fixed registers at which this link holds the
 	// value.  A link may reach several, as there may be no anchors between
-	// them.  A value that starts in a fixed register has a source link.
+	// them.  A value that starts in a fixed register has a source link.  A
+	// link with fixed uses can be the end of a path just as a chain can.
 	fixedUses []fixedUseT
 	searches  []*searchT // searches that may be using this link
 	loopDepth int        // depth of the innermost loop containing the link
@@ -437,6 +435,36 @@ func (block *regBlockT) getEnd() *CallNodeT {
 	return block.end
 }
 
+// The inputs to merging for one register class.
+type classInputsT struct {
+	chains util.SetT[*chainT]
+	// Links that have searches of their own, as their values may not come
+	// from a chain.  These are source links and the last links of constants
+	// that are passed to jumps.
+	rootLinks []*linkT
+}
+
+func (alloc *allocatorT) classInputs(class *RegisterClassT) *classInputsT {
+	if alloc.classes == nil {
+		alloc.classes = map[*RegisterClassT]*classInputsT{}
+	}
+	inputs := alloc.classes[class]
+	if inputs == nil {
+		inputs = &classInputsT{chains: util.NewSet[*chainT]()}
+		alloc.classes[class] = inputs
+	}
+	return inputs
+}
+
+func (alloc *allocatorT) addChain(chain *chainT) {
+	alloc.classInputs(chain.class).chains.Add(chain)
+}
+
+func (alloc *allocatorT) addRootLink(link *linkT, class *RegisterClassT) {
+	inputs := alloc.classInputs(class)
+	Push(&inputs.rootLinks, link)
+}
+
 type allocatorT struct {
 	allVars util.SetT[*VariableT]
 
@@ -444,16 +472,14 @@ type allocatorT struct {
 	// program.  Equal to twice the number of CPS calls.
 	numProgramPoints int
 
-	allChains util.SetT[*chainT]
+	// The chains and root links of each register class.  Classes are merged
+	// and colored separately.
+	classes map[*RegisterClassT]*classInputsT
 	// Registers whose values are changed at each program point, which is
 	// the late point of each call that changes any.
 	clobbers map[int][]RegisterT
 	// Links whose values are moved to or from fixed registers.
 	preferences []preferenceT
-	// Links that have searches of their own, as their values may not come
-	// from a chain.  These are source links and the last links of constants
-	// that are passed to jumps.
-	rootLinks []*linkT
 	// Links that are not in chains.  Links are added when they are made and
 	// removed when they are put in a chain, so when merging is done these
 	// are the source links and the links that are in memory.  Anchor links
@@ -476,10 +502,7 @@ func AllocateRegisters(
 		Frames: map[*CallNodeT]*RegFrameT{},
 	}
 	for _, proc := range FindProcs(top) {
-		allocator := &allocatorT{
-			allVars:   util.NewSet[*VariableT](),
-			allChains: util.NewSet[*chainT](),
-		}
+		allocator := &allocatorT{allVars: util.NewSet[*VariableT]()}
 		moves, regFrame := allocator.allocate(proc, classes)
 		maps.Copy(result.Moves, moves)
 		result.Frames[proc] = regFrame
@@ -535,8 +558,8 @@ func (alloc *allocatorT) allocate(
 		alloc.printLinks(blocks)
 	}
 
-	alloc.mergeChains()
 	for _, class := range classes {
+		alloc.mergeChains(class)
 		alloc.colorChains(class)
 	}
 	return alloc.findMoves(blocks)
@@ -628,7 +651,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 				}
 				alloc.connectBelow(block, link, end, liveLink)
 				vart.definition = link
-				Push(&alloc.rootLinks, link)
+				alloc.addRootLink(link, spec.Class)
 			}
 			delete(block.liveLinks, vart)
 		}
@@ -650,12 +673,7 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 					link := alloc.makeLink(vart, block.loop.depth())
 					block.liveLinks[vart] = &liveLinkT{endIndex: lateIndex, link: link}
 				}
-				// This is set even if the value is used later.  The use may be
-				// the only reason for the value to be in a register, as when the
-				// value is passed around a loop.
-				link := block.liveLinks[vart].link
-				link.fixedUse = spec.Class
-				alloc.addPreference(block, link, spec.Fixed)
+				alloc.addPreference(block, block.liveLinks[vart].link, spec.Fixed)
 			}
 		}
 		anchors := map[*VariableT]*linkT{}
@@ -678,7 +696,9 @@ func (alloc *allocatorT) findLiveRanges(top *CallNodeT) {
 		}
 		// The link that has the value at the call's early point is the
 		// anchor, if the value is also used in a register that the allocator
-		// assigns.
+		// assigns.  The fixed use is recorded even if the value is used later,
+		// as it may be the only reason for the value to be in a register, as
+		// when the value is passed around a loop.
 		for i, vart := range fixedInputs {
 			link := anchors[vart]
 			if link == nil {
@@ -750,11 +770,21 @@ func (alloc *allocatorT) connectJump(block *regBlockT) {
 			// The output's value may come only from constants, which are not in
 			// chains.  Searches from constants have the lowest priority, so
 			// this has a search of its own.
-			if argument.constant() != nil && !slices.Contains(alloc.rootLinks, end) {
-				Push(&alloc.rootLinks, end)
+			if argument.constant() != nil && alloc.rootLinkClass(end) == nil {
+				alloc.addRootLink(end, alloc.rootLinkClass(argument.definition))
 			}
 		}
 	}
+}
+
+// The class of a root link, or nil if 'link' is not one.
+func (alloc *allocatorT) rootLinkClass(link *linkT) *RegisterClassT {
+	for class, inputs := range alloc.classes {
+		if slices.Contains(inputs.rootLinks, link) {
+			return class
+		}
+	}
+	return nil
 }
 
 // The link for the i'th output of a JumpLambda, or nil if it isn't used.
@@ -848,7 +878,7 @@ func (alloc *allocatorT) addAnchorLink(
 	}
 	chain := newChain(link, class)
 	chain.allowed = alloc.allowedRegisters(&link.liveRange, class)
-	alloc.allChains.Add(chain)
+	alloc.addChain(chain)
 	return link
 }
 

@@ -36,8 +36,7 @@ func setTestRegisters(count int) {
 // The blocks must be in reverse postorder.
 func newTestAllocator(blocks []*regBlockT) *allocatorT {
 	alloc := &allocatorT{
-		allVars:   util.NewSet[*VariableT](),
-		allChains: util.NewSet[*chainT](),
+		allVars: util.NewSet[*VariableT](),
 	}
 	index := 0
 	for _, block := range blocks {
@@ -52,7 +51,7 @@ func newTestAllocator(blocks []*regBlockT) *allocatorT {
 func allocateTestBlocks(blocks []*regBlockT) *allocatorT {
 	alloc := newTestAllocator(blocks)
 	alloc.makeLinks(blocks)
-	alloc.mergeChains()
+	alloc.mergeChains(testClass)
 	alloc.colorChains(testClass)
 	return alloc
 }
@@ -158,8 +157,8 @@ func TestMergeBranches(t *testing.T) {
 			}
 			alloc := allocateTestBlocks(blocks)
 			checkAllocation(t, alloc)
-			if len(alloc.allChains) != 2 {
-				t.Errorf("got %d chains, expected 2", len(alloc.allChains))
+			if len(alloc.sortedChains()) != 2 {
+				t.Errorf("got %d chains, expected 2", len(alloc.sortedChains()))
 			}
 			moves, _ := alloc.findMoves(blocks)
 			if len(moves) != 0 {
@@ -189,8 +188,8 @@ func TestMergeManyDiamonds(t *testing.T) {
 	blocks[len(blocks)-1].addTestCall(vars, EarlyRegUse, nil, LateRegUse)
 	alloc := allocateTestBlocks(blocks)
 	checkAllocation(t, alloc)
-	if len(alloc.allChains) != len(vars) {
-		t.Errorf("got %d chains, expected %d", len(alloc.allChains), len(vars))
+	if len(alloc.sortedChains()) != len(vars) {
+		t.Errorf("got %d chains, expected %d", len(alloc.sortedChains()), len(vars))
 	}
 }
 
@@ -333,7 +332,7 @@ func (primop testCallPrimopT) ClobberedRegisters(call *CallNodeT) []RegisterT {
 
 // Registers that the allocator does not assign.
 var unallocatedTestRegisters = []RegisterT{
-	&testRegisterT{number: 100}, &testRegisterT{number: 101}, &testRegisterT{number: 102},
+	&testRegisterT{testClass, 100}, &testRegisterT{testClass, 101}, &testRegisterT{testClass, 102},
 }
 
 // The registers used as fixed registers in tests.  These are either ones
@@ -699,11 +698,10 @@ func TestMergeCancelsSearches(t *testing.T) {
 	block.addTestCall(vars, EarlyRegUse, nil, LateRegUse)
 	alloc := &allocatorT{
 		allVars:          util.NewSet[*VariableT](),
-		allChains:        util.NewSet[*chainT](),
 		numProgramPoints: block.endIndex,
 	}
 	alloc.makeLinks([]*regBlockT{block})
-	alloc.startMerge()
+	alloc.startMerge(testClass)
 	upper := vars[0].definition.chain
 	lower := vars[0].uses[firstUse].chain
 	upperSearch := upper.search
@@ -719,7 +717,7 @@ func TestMergeCancelsSearches(t *testing.T) {
 	if found != lower {
 		t.Fatalf("search found the wrong chain")
 	}
-	alloc.addPath(upper, lower, path)
+	alloc.addPath(upper, lower, path, testClass)
 	if lower.root() != upper {
 		t.Fatalf("chains were not merged")
 	}

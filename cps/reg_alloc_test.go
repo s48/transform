@@ -147,8 +147,7 @@ func TestFindLiveRangesBoundary(t *testing.T) {
 			first.addNext(second)
 
 			alloc := &allocatorT{
-				allVars:   util.NewSet[*VariableT](),
-				allChains: util.NewSet[*chainT](),
+				allVars: util.NewSet[*VariableT](),
 			}
 			alloc.makeLinks([]*regBlockT{first, second})
 
@@ -221,8 +220,7 @@ func TestFindLiveRangesBranches(t *testing.T) {
 				}
 			}
 			alloc := &allocatorT{
-				allVars:   util.NewSet[*VariableT](),
-				allChains: util.NewSet[*chainT](),
+				allVars: util.NewSet[*VariableT](),
 			}
 			alloc.makeLinks(blocks)
 
@@ -348,8 +346,7 @@ func TestConnectJump(t *testing.T) {
 		t.Fatalf("blocks in wrong order")
 	}
 	alloc := &allocatorT{
-		allVars:   util.NewSet[*VariableT](),
-		allChains: util.NewSet[*chainT](),
+		allVars: util.NewSet[*VariableT](),
 	}
 	alloc.makeLinks(blocks)
 
