@@ -247,7 +247,7 @@ func (primop *JumpPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, EnvT
 type ProcCallPrimopT struct{}
 
 func (primop *ProcCallPrimopT) Name() string             { return "procCall" }
-func (primop *ProcCallPrimopT) SideEffects() bool        { return false }
+func (primop *ProcCallPrimopT) SideEffects() bool        { return true }
 func (primop *ProcCallPrimopT) Simplify(call *CallNodeT) { SimplifyProcCall(call) }
 func (primop *ProcCallPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
 	return registerUsageSpec(call, jumpRegUseSpec, outputSpec)

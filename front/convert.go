@@ -653,28 +653,21 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	// indexPrimop(rangeVal, key).  Ranging over an integer has no values.
 	rangeLimit := rangeVal
 	indexPrimop := ""
-	switch rangeType := env.typeInfo.Types[rangeStmt.X].Type.Underlying().(type) {
+	rangeType := env.typeInfo.Types[rangeStmt.X].Type
+	_, isArrayPointer := arrayPointerElem(rangeType)
+	rangeVal, rangeType = derefArrayPointer(rangeVal, rangeType, calls)
+	switch rangeType := rangeType.Underlying().(type) {
 	case *types.Slice:
 		rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
 		indexPrimop = "sliceIndex"
 	case *types.Array:
 		// The range expression is evaluated once, so a value variable
-		// gets the elements of a copy of the array.
-		if valueLhs != nil {
+		// gets the elements of a copy of the array.  An array pointed
+		// to is not copied.
+		if valueLhs != nil && !isArrayPointer {
 			rangeVal = freshAggregateCopy(rangeVal, rangeType, calls)
 		}
 		rangeLimit = MakeLiteral(big.NewInt(rangeType.Len()), types.Typ[types.Int])
-		indexPrimop = "arrayIndex"
-	case *types.Pointer:
-		// A pointer to an array, which is not copied.
-		arrayType := rangeType.Elem()
-		array, isArray := arrayType.Underlying().(*types.Array)
-		if !isArray {
-			panic(fmt.Sprintf("range over a pointer to a non-array at %s", source(rangeStmt.X.Pos())))
-		}
-		arrayVar := calls.BuildCall("pointerToAggregate", "v", arrayType, rangeVal)
-		rangeVal = MakeReferenceNode(arrayVar)
-		rangeLimit = MakeLiteral(big.NewInt(array.Len()), types.Typ[types.Int])
 		indexPrimop = "arrayIndex"
 	}
 	if valueLhs != nil && indexPrimop == "" {
@@ -981,6 +974,18 @@ func cpsAndOrExpr(binaryExpr *ast.BinaryExpr, env *envT, calls *CallsT) []NodeT 
 }
 
 func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
+	// A call with a constant value, such as len(a) for an array 'a',
+	// does not evaluate its arguments.
+	typeAndValue := env.typeInfo.Types[callExpr]
+	if typeAndValue.Value != nil {
+		return []NodeT{MakeLiteral(typeAndValue.Value, typeAndValue.Type)}
+	}
+	length, isArrayLength := arrayLength(callExpr, env)
+	if isArrayLength {
+		// The argument contains a call, so it is evaluated for that.
+		Erase(cpsExpr(callExpr.Args[0], env, calls)[0])
+		return []NodeT{MakeLiteral(big.NewInt(length), types.Typ[types.Int])}
+	}
 	args := cpsArguments(callExpr.Args, env, calls)
 	fun, object := cpsCalledExpr(callExpr.Fun, env, calls)
 	if object != nil {
@@ -1010,6 +1015,54 @@ func cpsCallExpr(callExpr *ast.CallExpr, env *envT, calls *CallsT) []NodeT {
 	calls.AddCall(primop.(PrimopT), resultVars, args)
 	calls.SetLastSource(callExpr.Lparen)
 	return results
+}
+
+// If this is a call to the builtin len or cap on an array or a pointer
+// to an array, returns the array's length.
+func arrayLength(callExpr *ast.CallExpr, env *envT) (int64, bool) {
+	ident, isIdent := ast.Unparen(callExpr.Fun).(*ast.Ident)
+	if !isIdent {
+		return 0, false
+	}
+	builtin, isBuiltin := env.typeInfo.Uses[ident].(*types.Builtin)
+	if !isBuiltin || (builtin.Name() != "len" && builtin.Name() != "cap") {
+		return 0, false
+	}
+	typ := env.typeInfo.Types[callExpr.Args[0]].Type
+	elem, isPointer := arrayPointerElem(typ)
+	if isPointer {
+		typ = elem
+	}
+	array, isArray := typ.Underlying().(*types.Array)
+	if !isArray {
+		return 0, false
+	}
+	return array.Len(), true
+}
+
+// Go lets a pointer to an array stand for the array when indexing,
+// slicing, ranging, and in len and cap.  (Pointers to other types
+// can't be used this way, as slices, maps, and strings already refer
+// to their data.)  Returns the array type if 'typ' is a pointer to an
+// array.
+func arrayPointerElem(typ types.Type) (types.Type, bool) {
+	pointer, isPointer := typ.Underlying().(*types.Pointer)
+	if !isPointer {
+		return nil, false
+	}
+	_, isArray := pointer.Elem().Underlying().(*types.Array)
+	return pointer.Elem(), isArray
+}
+
+// If 'value', of type 'typ', is a pointer to an array, returns the
+// array and its type.  Otherwise returns 'value' and 'typ'.
+func derefArrayPointer(value NodeT, typ types.Type, calls *CallsT) (NodeT, types.Type) {
+	elem, isPointer := arrayPointerElem(typ)
+	if !isPointer {
+		return value, typ
+	}
+	arrayVar := calls.BuildCall("pointerToAggregate", "v", elem, value)
+	return MakeReferenceNode(arrayVar), elem
 }
 
 func cpsCalledExpr(expr ast.Expr, env *envT, calls *CallsT) (NodeT, NodeT) {
@@ -1107,10 +1160,11 @@ func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 		}
 	case *ast.IndexExpr:
 		values := cpsArguments([]ast.Expr{x.X, x.Index}, env, calls)
-		typeAndValue := env.typeInfo.Types[x.X]
+		var xType types.Type
+		values[0], xType = derefArrayPointer(values[0], env.typeInfo.Types[x.X].Type, calls)
 		var indexPrimop string
 		var elemType types.Type
-		switch xType := typeAndValue.Type.Underlying().(type) {
+		switch xType := xType.Underlying().(type) {
 		case *types.Slice:
 			indexPrimop = "sliceIndex"
 			elemType = xType.Elem()
