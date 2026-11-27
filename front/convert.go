@@ -117,9 +117,9 @@ func CpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types
 	env.returnVars.Push(contVar)
 	calls := MakeCalls()
 	env.currentBlock.Push(calls)
-	vars := makeFieldVars(funcType.Params.List, env, calls)
+	vars := makeFieldVars(funcType.Params.List, true, env, calls)
 	if funcType.Results != nil {
-		vars = append(vars, makeFieldVars(funcType.Results.List, env, calls)...)
+		vars = append(vars, makeFieldVars(funcType.Results.List, false, env, calls)...)
 	}
 	vars = append([]*VariableT{contVar}, vars...)
 	lambda := MakeLambda(name, ProcLambda, vars)
@@ -135,8 +135,10 @@ func CpsFunc(name string, funcType *ast.FuncType, body *ast.BlockStmt, typ types
 	return lambda
 }
 
-// Make the variables for a procedures arguments and returns.
-func makeFieldVars(fields []*ast.Field, env *envT, calls *CallsT) []*VariableT {
+// Make the variables for a procedures arguments and returns.  Aggregate
+// arguments are copied, as the caller passes a reference to its value
+// (see PointerLhsT).
+func makeFieldVars(fields []*ast.Field, isParams bool, env *envT, calls *CallsT) []*VariableT {
 	vars := []*VariableT{}
 	for _, field := range fields {
 		for _, ident := range field.Names {
@@ -144,7 +146,11 @@ func makeFieldVars(fields []*ast.Field, env *envT, calls *CallsT) []*VariableT {
 			paramVar := MakeVariable(ident.Name, paramVarType)
 			vars = append(vars, paramVar)
 			cellVar := env.bindCellVar(ident)
-			calls.BuildNoOutputCall("cellSet", cellVar, paramVar)
+			var value NodeT = MakeReferenceNode(paramVar)
+			if isParams {
+				value = freshAggregateCopy(value, paramVarType, calls)
+			}
+			calls.BuildNoOutputCall("cellSet", cellVar, value)
 		}
 	}
 	return vars
@@ -179,7 +185,7 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 							// value = MakeLiteral(big.NewInt(0), cellVar.Type)
 							value = valueVar
 						} else {
-							value = values[i]
+							value = freshAggregateCopy(values[i], cellVar.Type, calls)
 						}
 						calls.BuildNoOutputCall("cellSet", cellVar, value)
 					}
@@ -643,7 +649,7 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 		keyVar := MakeVariable("key", types.Typ[types.Int], rangeStmt.For)
 		keyVar.Flags["cell"] = true
 		env.addMakeCell(keyVar)
-		keyLhs = &PointerLhsT{"cellRef", "cellSet", keyVar, rangeStmt.For}
+		keyLhs = &PointerLhsT{"cellRef", "cellSet", keyVar, rangeStmt.For, true}
 	} else {
 		newOkay := rangeStmt.Tok == token.DEFINE
 		keyLhs = cpsLhs(rangeStmt.Key, newOkay, env, calls)
@@ -654,12 +660,20 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	keyLhs.write(MakeLiteral(big.NewInt(0), types.Typ[types.Int]), calls)
 	body := func(env *envT, calls *CallsT) {
 		if valueLhs != nil {
-			pointerVar := MakeVariable("v", types.NewPointer(valueLhs.valueType()))
-			calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
-			// calls.SetLastSource(x.Lbrack)
-			valueVar := MakeVariable("v", valueLhs.valueType())
-			calls.BuildVarCall("pointerRef", valueVar, pointerVar)
-			valueLhs.write(MakeReferenceNode(valueVar), calls)
+			// An aggregate element's address is its value; see PointerLhsT.
+			valueType := valueLhs.valueType()
+			if isAggregateType(valueType) {
+				valueVar := MakeVariable("v", valueType)
+				calls.BuildVarCall("sliceIndex", valueVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
+				valueLhs.write(MakeReferenceNode(valueVar), calls)
+			} else {
+				pointerVar := MakeVariable("v", types.NewPointer(valueType))
+				calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
+				// calls.SetLastSource(x.Lbrack)
+				valueVar := MakeVariable("v", valueType)
+				calls.BuildVarCall("pointerRef", valueVar, pointerVar)
+				valueLhs.write(MakeReferenceNode(valueVar), calls)
+			}
 		}
 		cpsStmt(rangeStmt.Body, env, calls)
 	}
@@ -773,12 +787,27 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		case "^":
 			op = "bitwiseNot"
 		case "&":
-			switch x := x.X.(type) {
+			// &X is the location that cpsLhs(X) reads and writes.  An
+			// aggregate's location is its data, which is also its
+			// value (see PointerLhsT), so only the type changes.
+			operand := ast.Unparen(x.X)
+			operandType := env.typeInfo.Types[operand].Type
+			if isAggregateType(operandType) {
+				value := cpsLhs(operand, false, env, calls).read(calls)
+				pointerVar := calls.BuildCall("aggregateToPointer", "v",
+					types.NewPointer(operandType), value)
+				calls.SetLastSource(x.OpPos)
+				return []NodeT{MakeReferenceNode(pointerVar)}
+			}
+			switch operand := operand.(type) {
 			case *ast.Ident:
-				vart := env.lookupVar(x)
+				vart := env.lookupVar(operand)
 				if vart != nil && vart.HasFlag("cell") {
 					return []NodeT{MakeReferenceNode(vart)}
 				}
+			case *ast.IndexExpr, *ast.StarExpr:
+				lhs := cpsLhs(operand, false, env, calls).(*PointerLhsT)
+				return []NodeT{MakeReferenceNode(lhs.pointer)}
 			}
 			op = "addressOf" // disambiguate from binary '&'
 		default:
@@ -843,7 +872,14 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		pointer := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
 		pointerVar := pointer.(*ReferenceNodeT).Variable
 		valueType := pointerVar.Type.(*types.Pointer).Elem()
-		valueVar := calls.BuildCall("pointerRef", pointerVar.Name, valueType, pointer)
+		// A pointer to an aggregate is the aggregate's value (see
+		// PointerLhsT), with a different type.
+		primop := "pointerRef"
+		if isAggregateType(valueType) {
+			primop = "pointerToAggregate"
+		}
+		valueVar := calls.BuildCall(primop, pointerVar.Name, valueType, pointer)
+		calls.SetLastSource(x.Star)
 		return []NodeT{MakeReferenceNode(valueVar)}
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
@@ -1020,24 +1056,25 @@ type LhsT interface {
 // expressions (x[y]) and star expressions (*x).  For identifiers if
 // newOkay is true this is a definition and a new variable can be created
 // (I suspect this is a must).  Index expressions can be for arrays,
-// slices, strings, and maps.  So far we only handle slices. and don't
-// handle star expressions.
+// slices, strings, and maps.  So far we only handle slices and arrays.
 
 func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 	astNode = ast.Unparen(astNode) // remove any parens
 	switch x := astNode.(type) {
 	case *ast.Ident:
 		cellVar := env.lookupVar(x)
+		isNew := false
 		if cellVar == nil {
 			if !newOkay {
 				panic(fmt.Sprintf("unbound variable %s", x.Name))
 			}
 			cellVar = env.bindCellVar(x)
+			isNew = true
 		}
 		if cellVar.HasFlag("cell") {
-			return &PointerLhsT{"cellRef", "cellSet", cellVar, x.NamePos}
+			return &PointerLhsT{"cellRef", "cellSet", cellVar, x.NamePos, isNew}
 		} else if cellVar.HasFlag("package") {
-			return &PointerLhsT{"packageRef", "packageSet", cellVar, x.NamePos}
+			return &PointerLhsT{"packageRef", "packageSet", cellVar, x.NamePos, isNew}
 		} else {
 			panic("non-cell variable in LHS")
 		}
@@ -1058,10 +1095,32 @@ func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 				xType,
 				source(astNode.Pos())))
 		}
-		pointerVar := MakeVariable("v", types.NewPointer(elemType))
+		// An aggregate element is stored in place, so its address is
+		// its value; see PointerLhsT.
+		readPrimop := "pointerRef"
+		pointerType := types.Type(types.NewPointer(elemType))
+		if isAggregateType(elemType) {
+			readPrimop = ""
+			pointerType = elemType
+		}
+		pointerVar := MakeVariable("v", pointerType)
 		calls.BuildVarCall(indexPrimop, pointerVar, values[0], values[1])
 		calls.SetLastSource(x.Lbrack)
-		return &PointerLhsT{"pointerRef", "pointerSet", pointerVar, x.Lbrack}
+		return &PointerLhsT{readPrimop, "pointerSet", pointerVar, x.Lbrack, false}
+	case *ast.StarExpr:
+		pointer := cpsExpr(x.X, env, calls)[0]
+		pointerType := env.typeInfo.Types[x.X].Type
+		valueType := pointerType.Underlying().(*types.Pointer).Elem()
+		if isAggregateType(valueType) {
+			// See the R-value case in cpsExpr.
+			valueVar := MakeVariable("v", valueType)
+			calls.BuildVarCall("pointerToAggregate", valueVar, pointer)
+			calls.SetLastSource(x.Star)
+			return &PointerLhsT{"", "pointerSet", valueVar, x.Star, false}
+		}
+		pointerVar := MakeVariable("v", pointerType)
+		calls.BuildVarCall("let", pointerVar, pointer)
+		return &PointerLhsT{"pointerRef", "pointerSet", pointerVar, x.Star, false}
 	default:
 		panic(fmt.Sprintf("unrecognized LHS %T %+v", astNode, astNode))
 	}
@@ -1086,15 +1145,28 @@ func assignCells(lhss []ast.Expr, values []NodeT, newOkay bool, env *envT, calls
 
 // An LHS where the location is a single variable, which so
 // far is all of them.
+//
+// Aggregates (arrays and structs) are values in Go, but an aggregate
+// value here is a reference to its data, so they are copied when
+// stored.  Reading an aggregate gives a reference to it where it is,
+// without copying it.  For a part of an aggregate that is itself an
+// aggregate (a[i] when 'a' is an array of arrays) the reference is the
+// part's address, which is what lets a[i][j] be an L-value.  Writing
+// an aggregate copies it, into the one already in the location, or,
+// for a new variable, into a new one.
 type PointerLhsT struct {
-	readPrimop  string
+	readPrimop  string // "" if 'pointer' is the value, for an aggregate part
 	writePrimop string
 	pointer     *VariableT
 	source      token.Pos
+	isNew       bool // the location is a variable being defined
 }
 
 func (lhs *PointerLhsT) read(calls *CallsT) NodeT {
 	node := MakeReferenceNode(lhs.pointer)
+	if lhs.readPrimop == "" {
+		return node
+	}
 	valueVar := MakeVariable(lhs.pointer.Name, lhs.valueType())
 	calls.BuildVarCall(lhs.readPrimop, valueVar, node)
 	calls.SetLastSource(lhs.source)
@@ -1102,14 +1174,44 @@ func (lhs *PointerLhsT) read(calls *CallsT) NodeT {
 }
 
 func (lhs *PointerLhsT) write(value NodeT, calls *CallsT) {
+	if isAggregateType(lhs.valueType()) {
+		if lhs.isNew {
+			value = freshAggregateCopy(value, lhs.valueType(), calls)
+		} else {
+			calls.BuildNoOutputCall("copyAggregate", lhs.read(calls), value)
+			calls.SetLastSource(lhs.source)
+			return
+		}
+	}
 	calls.BuildNoOutputCall(lhs.writePrimop, lhs.pointer, value)
+}
+
+// Arrays and structs.
+func isAggregateType(typ types.Type) bool {
+	switch typ.Underlying().(type) {
+	case *types.Array, *types.Struct:
+		return true
+	}
+	return false
+}
+
+// If 'typ' is an aggregate type, returns a copy of 'value' in a new
+// one, otherwise returns 'value'.
+func freshAggregateCopy(value NodeT, typ types.Type, calls *CallsT) NodeT {
+	if !isAggregateType(typ) {
+		return value
+	}
+	copyVar := MakeVariable("v", typ)
+	calls.BuildVarCall("new", copyVar)
+	calls.BuildNoOutputCall("copyAggregate", copyVar, value)
+	return MakeReferenceNode(copyVar)
 }
 
 // Hack forced by our not giving cells the pointer type that
 // they really have.
 
 func (lhs *PointerLhsT) valueType() types.Type {
-	if lhs.readPrimop == "cellRef" || lhs.readPrimop == "packageRef" {
+	if lhs.readPrimop == "cellRef" || lhs.readPrimop == "packageRef" || lhs.readPrimop == "" {
 		return lhs.pointer.Type
 	} else {
 		return lhs.pointer.Type.(*types.Pointer).Elem()
