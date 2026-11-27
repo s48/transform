@@ -561,8 +561,12 @@ func (alloc *allocatorT) allocate(
 	alloc.numProgramPoints = index
 	alloc.makeLinks(blocks)
 	if len(blocks[0].liveIn) != 0 {
-		panic(fmt.Sprintf("procedure %s_%d has free variables, which are not supported yet",
-			proc.Name, proc.Id))
+		freeVars := []string{}
+		for vart := range blocks[0].liveIn {
+			Push(&freeVars, vart.String())
+		}
+		panic(fmt.Sprintf("procedure %s_%d has missing register spec or free variables %s, which are not supported yet",
+			proc.Name, proc.Id, freeVars))
 	}
 
 	if PrintRegisterLinks {

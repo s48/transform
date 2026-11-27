@@ -171,9 +171,13 @@ func cpsStmt(astNode ast.Stmt, env *envT, calls *CallsT) {
 					}
 					for i, ident := range spec.Names {
 						cellVar := env.bindCellVar(ident)
-						var value NodeT
+						var value any
 						if spec.Values == nil {
-							value = MakeLiteral(big.NewInt(0), cellVar.Type)
+							valueVar := CopyVariable(cellVar)
+							delete(valueVar.Flags, "cell") // It isn't a cell.
+							calls.AddCall(LookupPrimop("defaultValue"), []*VariableT{valueVar}, nil)
+							// value = MakeLiteral(big.NewInt(0), cellVar.Type)
+							value = valueVar
 						} else {
 							value = values[i]
 						}
@@ -1040,15 +1044,24 @@ func cpsLhs(astNode ast.Expr, newOkay bool, env *envT, calls *CallsT) LhsT {
 	case *ast.IndexExpr:
 		values := cpsArguments([]ast.Expr{x.X, x.Index}, env, calls)
 		typeAndValue := env.typeInfo.Types[x.X]
+		var indexPrimop string
+		var elemType types.Type
 		switch xType := typeAndValue.Type.Underlying().(type) {
 		case *types.Slice:
-			pointerVar := MakeVariable("v", types.NewPointer(xType.Elem()))
-			calls.BuildVarCall("sliceIndex", pointerVar, values[0], values[1])
-			calls.SetLastSource(x.Lbrack)
-			return &PointerLhsT{"pointerRef", "PointerSet", pointerVar, x.Lbrack}
+			indexPrimop = "sliceIndex"
+			elemType = xType.Elem()
+		case *types.Array:
+			indexPrimop = "arrayIndex"
+			elemType = xType.Elem()
 		default:
-			panic("Indexed LHS of unexpected type at " + source(astNode.Pos()))
+			panic(fmt.Sprintf("Indexed LHS of unexpected type '%s' at %s",
+				xType,
+				source(astNode.Pos())))
 		}
+		pointerVar := MakeVariable("v", types.NewPointer(elemType))
+		calls.BuildVarCall(indexPrimop, pointerVar, values[0], values[1])
+		calls.SetLastSource(x.Lbrack)
+		return &PointerLhsT{"pointerRef", "pointerSet", pointerVar, x.Lbrack}
 	default:
 		panic(fmt.Sprintf("unrecognized LHS %T %+v", astNode, astNode))
 	}

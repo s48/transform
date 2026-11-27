@@ -197,7 +197,7 @@ func (primop *CellSetPrimopT) Evaluate(call *CallNodeT, env EnvT) (*CallNodeT, E
 
 type PointerSetPrimopT struct{}
 
-func (primop *PointerSetPrimopT) Name() string             { return "PointerSet" }
+func (primop *PointerSetPrimopT) Name() string             { return "pointerSet" }
 func (primop *PointerSetPrimopT) SideEffects() bool        { return true }
 func (primop *PointerSetPrimopT) Simplify(call *CallNodeT) { DefaultSimplify(call) }
 func (primop *PointerSetPrimopT) RegisterUsage(call *CallNodeT) ([]*RegUseSpecT, []*RegUseSpecT) {
