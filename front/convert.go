@@ -634,14 +634,6 @@ func makeForLoop(condCalls *CallsT, // any calls for evaluating 'cond'
 
 func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	rangeVal := cpsExpr(rangeStmt.X, env, calls)[0]
-	rangeLimit := rangeVal
-	if rangeVal.NodeType() == ReferenceNode {
-		rangeVar := rangeVal.(*ReferenceNodeT).Variable
-		switch rangeVar.Type.(type) {
-		case *types.Slice:
-			rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
-		}
-	}
 	var keyLhs LhsT
 	var valueLhs LhsT
 	if rangeStmt.Tok == token.ILLEGAL {
@@ -657,6 +649,37 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 			valueLhs = cpsLhs(rangeStmt.Value, newOkay, env, calls)
 		}
 	}
+	// The loop runs from 0 to rangeLimit, and the values are from
+	// indexPrimop(rangeVal, key).  Ranging over an integer has no values.
+	rangeLimit := rangeVal
+	indexPrimop := ""
+	switch rangeType := env.typeInfo.Types[rangeStmt.X].Type.Underlying().(type) {
+	case *types.Slice:
+		rangeLimit = MakeReferenceNode(calls.BuildCall("len", "len", types.Typ[types.Int], rangeVal))
+		indexPrimop = "sliceIndex"
+	case *types.Array:
+		// The range expression is evaluated once, so a value variable
+		// gets the elements of a copy of the array.
+		if valueLhs != nil {
+			rangeVal = freshAggregateCopy(rangeVal, rangeType, calls)
+		}
+		rangeLimit = MakeLiteral(big.NewInt(rangeType.Len()), types.Typ[types.Int])
+		indexPrimop = "arrayIndex"
+	case *types.Pointer:
+		// A pointer to an array, which is not copied.
+		arrayType := rangeType.Elem()
+		array, isArray := arrayType.Underlying().(*types.Array)
+		if !isArray {
+			panic(fmt.Sprintf("range over a pointer to a non-array at %s", source(rangeStmt.X.Pos())))
+		}
+		arrayVar := calls.BuildCall("pointerToAggregate", "v", arrayType, rangeVal)
+		rangeVal = MakeReferenceNode(arrayVar)
+		rangeLimit = MakeLiteral(big.NewInt(array.Len()), types.Typ[types.Int])
+		indexPrimop = "arrayIndex"
+	}
+	if valueLhs != nil && indexPrimop == "" {
+		panic(fmt.Sprintf("range value over an unsupported type at %s", source(rangeStmt.X.Pos())))
+	}
 	keyLhs.write(MakeLiteral(big.NewInt(0), types.Typ[types.Int]), calls)
 	body := func(env *envT, calls *CallsT) {
 		if valueLhs != nil {
@@ -664,11 +687,11 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 			valueType := valueLhs.valueType()
 			if isAggregateType(valueType) {
 				valueVar := MakeVariable("v", valueType)
-				calls.BuildVarCall("sliceIndex", valueVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
+				calls.BuildVarCall(indexPrimop, valueVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
 				valueLhs.write(MakeReferenceNode(valueVar), calls)
 			} else {
 				pointerVar := MakeVariable("v", types.NewPointer(valueType))
-				calls.BuildVarCall("sliceIndex", pointerVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
+				calls.BuildVarCall(indexPrimop, pointerVar, CopyNodeTree(rangeVal), keyLhs.read(calls))
 				// calls.SetLastSource(x.Lbrack)
 				valueVar := MakeVariable("v", valueType)
 				calls.BuildVarCall("pointerRef", valueVar, pointerVar)
@@ -688,6 +711,10 @@ func cpsRangeLoop(rangeStmt *ast.RangeStmt, env *envT, calls *CallsT) {
 	condVar := condCalls.BuildCall("<", "cond", types.Typ[types.Bool], keyVal, rangeLimit)
 	condCalls.SetLastSource(rangeStmt.Range)
 	makeForLoop(condCalls, MakeReferenceNode(condVar), body, post, rangeStmt.For, env, calls)
+	if indexPrimop == "arrayIndex" {
+		// The limit is a literal, so the loop has only used copies.
+		Erase(rangeVal)
+	}
 }
 
 // We don't do maps or anything compilicated, so we assume keys are
