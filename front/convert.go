@@ -761,7 +761,14 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		return makeExprCall("makeLiteral", x.Lbrace, x, env, calls, inputs...)
 	case *ast.UnaryExpr:
 		op := x.Op.String()
-		if op == "&" {
+		switch op {
+		case "!":
+			// works as-is
+		case "-":
+			op = "negate"
+		case "^":
+			op = "bitwiseNot"
+		case "&":
 			switch x := x.X.(type) {
 			case *ast.Ident:
 				vart := env.lookupVar(x)
@@ -770,6 +777,8 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 				}
 			}
 			op = "addressOf" // disambiguate from binary '&'
+		default:
+			panic(fmt.Sprintf("unrecognized unary operator '%s' at %s", op, source(x.Pos())))
 		}
 		value := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
 		return makeExprCall(op, x.OpPos, x, env, calls, value)
