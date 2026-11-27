@@ -40,10 +40,30 @@ func SimplifyCells(top *CallNodeT) {
 	// The blocks containing the setVars for each cellVar.
 	varSetBlocks := map[*VariableT][]*cellBlockT{}
 
+	// Number of references found, to identify escapees.
+	varRefCounts := map[*VariableT]int{}
+
 	// Set the .read and .written fields of each block and initialize
 	// the .live fields to be the same as .read.
 	for _, block := range blocks {
-		findCellVars(block, varSetBlocks)
+		findCellVars(block, varSetBlocks, varRefCounts)
+	}
+
+	// If we didn't find all of the references then the cell escapes
+	// in some fashion and we cannot convert it to SSA.
+	escapees := []*VariableT{}
+	for vart, count := range varRefCounts {
+		if count < len(vart.Refs) {
+			Push(&escapees, vart)
+		}
+	}
+	for _, vart := range escapees {
+		delete(varRefCounts, vart)
+		for _, block := range blocks {
+			block.written.Remove(vart)
+			block.read.Remove(vart)
+			block.live.Remove(vart)
+		}
 	}
 	propagateLive(blocks) // transitive closure of the .live sets
 	findDominators(blocks[0],
@@ -66,26 +86,41 @@ func SimplifyCells(top *CallNodeT) {
 	// for _, block := range blocks {
 	//    printBlockVars(block)
 	// }
-	simplifyBlockCells(blocks[0], nil)
+	simplifyBlockCells(blocks[0], nil, varRefCounts)
 	for _, block := range blocks {
 		block.start.Block = nil
 	}
 }
 
-func findCellVars(block *cellBlockT, varSetBlocks map[*VariableT][]*cellBlockT) {
+func findCellVars(
+	block *cellBlockT,
+	varSetBlocks map[*VariableT][]*cellBlockT,
+	varRefCounts map[*VariableT]int,
+) {
 	call := block.start
 	for {
-		if call.Primop.Name() == "cellSet" {
+		switch call.Primop.Name() {
+		case "makeCell":
+			varRefCounts[call.Outputs[0]] = 0
+		case "cellSet":
 			cellVar := call.Inputs[0].(*ReferenceNodeT).Variable
-			if !block.written.Contains(cellVar) {
-				block.written.Add(cellVar)
-				varSetBlocks[cellVar] = append(varSetBlocks[cellVar], block)
+			count, found := varRefCounts[cellVar]
+			if found {
+				varRefCounts[cellVar] = count + 1
+				if !block.written.Contains(cellVar) {
+					block.written.Add(cellVar)
+					varSetBlocks[cellVar] = append(varSetBlocks[cellVar], block)
+				}
 			}
-		} else if call.Primop.Name() == "cellRef" {
+		case "cellRef":
 			cellVar := call.Inputs[0].(*ReferenceNodeT).Variable
-			if !block.written.Contains(cellVar) {
-				block.read.Add(cellVar)
-				block.live.Add(cellVar)
+			count, found := varRefCounts[cellVar]
+			if found {
+				varRefCounts[cellVar] = count + 1
+				if !block.written.Contains(cellVar) {
+					block.read.Add(cellVar)
+					block.live.Add(cellVar)
+				}
 			}
 		}
 		if call == block.end {
@@ -213,7 +248,11 @@ func (env *CellValuesT) setValue(cellVar *VariableT, value *VariableT) {
 	env.values[cellVar] = value
 }
 
-func simplifyBlockCells(block *cellBlockT, values *CellValuesT) {
+func simplifyBlockCells(
+	block *cellBlockT,
+	values *CellValuesT,
+	varRefCounts map[*VariableT]int,
+) {
 	values = makeCellValues(values)
 
 	start := block.start
@@ -229,10 +268,16 @@ func simplifyBlockCells(block *cellBlockT, values *CellValuesT) {
 	for {
 		if call.Primop.Name() == "cellSet" {
 			cellVar := call.Inputs[0].(*ReferenceNodeT).Variable
-			values.setValue(cellVar, replaceCellSet(call))
+			_, found := varRefCounts[cellVar]
+			if found {
+				values.setValue(cellVar, replaceCellSet(call))
+			}
 		} else if call.Primop.Name() == "cellRef" {
 			cellVar := call.Inputs[0].(*ReferenceNodeT).Variable
-			replaceCellRef(call, values.lookup(cellVar))
+			_, found := varRefCounts[cellVar]
+			if found {
+				replaceCellRef(call, values.lookup(cellVar))
+			}
 		}
 		if call == block.end {
 			break
@@ -253,7 +298,7 @@ func simplifyBlockCells(block *cellBlockT, values *CellValuesT) {
 	}
 	for _, child := range block.dominatees {
 		if child != block {
-			simplifyBlockCells(child, values)
+			simplifyBlockCells(child, values, varRefCounts)
 		}
 	}
 }

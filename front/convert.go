@@ -760,11 +760,18 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 		inputs := cpsArguments(x.Elts, env, calls)
 		return makeExprCall("makeLiteral", x.Lbrace, x, env, calls, inputs...)
 	case *ast.UnaryExpr:
-		value := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
 		op := x.Op.String()
 		if op == "&" {
+			switch x := x.X.(type) {
+			case *ast.Ident:
+				vart := env.lookupVar(x)
+				if vart != nil && vart.HasFlag("cell") {
+					return []NodeT{MakeReferenceNode(vart)}
+				}
+			}
 			op = "addressOf" // disambiguate from binary '&'
 		}
+		value := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
 		return makeExprCall(op, x.OpPos, x, env, calls, value)
 	case *ast.BinaryExpr:
 		if x.Op.String() == "&&" || x.Op.String() == "||" {
@@ -819,6 +826,12 @@ func cpsExpr(astNode ast.Expr, env *envT, calls *CallsT) []NodeT {
 			panic(fmt.Sprintf("have selection %s\n", selection))
 		}
 		panic(fmt.Sprintf("unhandled selector expression %s", source(x.Pos())))
+	case *ast.StarExpr:
+		pointer := cpsArguments([]ast.Expr{x.X}, env, calls)[0]
+		pointerVar := pointer.(*ReferenceNodeT).Variable
+		valueType := pointerVar.Type.(*types.Pointer).Elem()
+		valueVar := calls.BuildCall("pointerRef", pointerVar.Name, valueType, pointer)
+		return []NodeT{MakeReferenceNode(valueVar)}
 	default:
 		panic(fmt.Sprintf("unrecognized expression %T %s", astNode, source(astNode.Pos())))
 	}

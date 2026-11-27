@@ -282,7 +282,9 @@ func SimplifyMakeCell(call *CallNodeT) {
 		call := ref.parent
 		switch call.Primop.Name() {
 		case "cellSet":
-			if cellSetCall == nil {
+			if ref.Index() != 0 {
+				return // used as a value, nothing we can do
+			} else if cellSetCall == nil {
 				cellSetCall = call
 			} else {
 				return // set two or more times, nothing we can do
@@ -290,7 +292,8 @@ func SimplifyMakeCell(call *CallNodeT) {
 		case "cellRef":
 			refCalls = append(refCalls, call)
 		default:
-			panic("unexpected cell use")
+			// The cell escapes somehow, so we need to leave it in place.
+			return
 		}
 	}
 	if cellSetCall == nil {
